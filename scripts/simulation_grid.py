@@ -1,162 +1,91 @@
 """
-Simulation: Compound Poisson-Gamma (Tweedie) DGP - Bulletproof Version
+simulation_dgp_hmm_final.py
+Principled 4-World 3-State HMM with Hierarchical Heterogeneity
+DGP for SMC Methodological Enablement Paper
 """
 
 import numpy as np
 import pandas as pd
-import json
+from dataclasses import dataclass
 from pathlib import Path
+import json
 
+@dataclass
+class WorldConfig:
+    name: str
+    sparsity_level: str  # "Low" or "High"
+    tail_level: str      # "Light" or "Heavy"
+    pi0_base: np.ndarray        # Base sparsity for [Dormant, Lukewarm, Whale]
+    mu_base: np.ndarray         # Base mean spend for [Dormant, Lukewarm, Whale]
+    alpha_base: np.ndarray      # Gamma shape for [Dormant, Lukewarm, Whale]
+    Gamma: np.ndarray           # 3x3 Transition Matrix
+    sigma_re: float = 0.40      # Strength of customer-level heterogeneity
+    N: int = 200
+    T: int = 52
+    seed: int = 42
 
-def make_serializable(obj):
-    """Last resort JSON serializer"""
-    try:
-        # Test if JSON serializable
-        json.dumps(obj)
-        return obj
-    except (TypeError, OverflowError):
-        # Convert numpy types
-        if hasattr(obj, 'item'):
-            return obj.item()
-        elif isinstance(obj, np.ndarray):
-            return obj.tolist()
-        elif isinstance(obj, dict):
-            return {k: make_serializable(v) for k, v in obj.items()}
-        elif isinstance(obj, (list, tuple)):
-            return [make_serializable(v) for v in obj]
-        else:
-            return str(obj)
-
-
-def generate_one_dataset(lam, N, T, alpha, beta, seed, output_dir):
-    """Generate single dataset - all native Python types"""
-    rng = np.random.default_rng(int(seed))
-    N, T, seed = int(N), int(T), int(seed)
-    lam, alpha, beta = float(lam), float(alpha), float(beta)
+def generate_hmm_data(cfg: WorldConfig):
+    rng = np.random.default_rng(cfg.seed)
+    K = 3
     
-    total_obs = N * T
+    # 1. Hierarchical Customer Random Effects (Heterogeneity)
+    # Draw shifts in logit(pi0) and log(mu) space for each customer-state pair
+    re_pi0 = rng.normal(0, cfg.sigma_re, size=(cfg.N, K))
+    re_mu  = rng.normal(0, cfg.sigma_re, size=(cfg.N, K))
+    
+    # Transform bases
+    logit_pi0 = np.log(cfg.pi0_base / (1 - cfg.pi0_base))
+    pi0_ik = 1 / (1 + np.exp(-(logit_pi0 + re_pi0)))
+    
+    mu_ik = np.exp(np.log(cfg.mu_base) + re_mu)
+    beta_ik = cfg.alpha_base / mu_ik  # beta = shape / mean
+    
+    # 2. State Evolution (Markov Chain)
+    states = np.zeros((cfg.N, cfg.T), dtype=int)
+    init_dist = [0.60, 0.30, 0.10] # Your 60/30/10 split
+    states[:, 0] = rng.choice(K, size=cfg.N, p=init_dist)
+    
+    for t in range(1, cfg.T):
+        for i in range(cfg.N):
+            states[i, t] = rng.choice(K, p=cfg.Gamma[states[i, t-1]])
+            
+    # 3. Fully Vectorized Emissions
+    cust_idx = np.repeat(np.arange(cfg.N), cfg.T)
+    time_idx = np.tile(np.arange(cfg.T), cfg.N)
+    flat_states = states.flatten()
+    
+    # Broad-cast customer-state parameters to observation level
+    pi0_obs = pi0_ik[cust_idx, flat_states]
+    alpha_obs = cfg.alpha_base[flat_states]
+    beta_obs = beta_ik[cust_idx, flat_states]
     
     # Generate data
-    m = rng.poisson(lam, size=total_obs)
-    y = np.zeros(total_obs)
-    pos_mask = m > 0
-    if pos_mask.any():
-        y[pos_mask] = rng.gamma(m[pos_mask] * alpha, 1.0 / beta)
-    
-    # Build DataFrame with Python lists, not numpy arrays
-    customer_id = [int(i) for i in np.repeat(np.arange(N), T)]
-    t = [int(i) for i in np.tile(np.arange(T), N)]
-    y_list = [float(val) for val in y]
-    m_list = [int(val) for val in m]
-    is_zero_list = [int(val == 0) for val in m]
+    is_zero = rng.random(cfg.N * cfg.T) < pi0_obs
+    y = rng.gamma(alpha_obs, 1.0 / beta_obs)
+    y[is_zero] = 0.0
     
     df = pd.DataFrame({
-        'customer_id': customer_id,
-        't': t,
-        'y': y_list,
-        'purchase_count': m_list,
-        'is_zero': is_zero_list,
-        'lam_true': [float(lam)] * total_obs,
-        'alpha_true': [float(alpha)] * total_obs,
-        'beta_true': [float(beta)] * total_obs,
-        'pi_0_true': [float(np.exp(-lam))] * total_obs
+        'customer_id': cust_idx,
+        't': time_idx,
+        'y': y,
+        'true_state': flat_states
     })
     
-    # Compute moments using Python floats only
-    y_arr = np.array(y_list)
-    y_pos = y_arr[y_arr > 0]
-    
-    moments = {
-        'empirical_pi_0': float(np.mean(y_arr == 0)),
-        'empirical_mean_purchases': float(np.mean(m_list)),
-        'empirical_mean_spend': float(np.mean(y_pos)) if len(y_pos) > 0 else 0.0,
-        'empirical_var_spend': float(np.var(y_pos, ddof=1)) if len(y_pos) > 1 else 0.0,
-        'empirical_skew_spend': float(pd.Series(y_pos).skew()) if len(y_pos) > 2 else 0.0,
-        'n_zeros': int(np.sum(y_arr == 0)),
-        'n_positive': int(np.sum(y_arr > 0))
-    }
-    
-    # Save
-    filename = f"sim_lam{lam:.3f}_N{N}_T{T}_a{alpha:.1f}_b{beta:.1f}_seed{seed}.csv"
-    filepath = Path(output_dir) / filename
-    filepath.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(filepath, index=False)
-    
-    # Build metadata
-    metadata = {
-        'filename': str(filename),
-        'config': {
-            'lam': lam,
-            'pi_0': float(np.exp(-lam)),
-            'N': N,
-            'T': T,
-            'alpha': alpha,
-            'beta': beta,
-            'seed': seed
-        },
-        'true_params': {
-            'lam': lam,
-            'alpha': alpha,
-            'beta': beta,
-            'pi_0': float(np.exp(-lam)),
-            'mean_spend': alpha / beta,
-            'var_spend': alpha / (beta ** 2),
-            'skewness': 2.0 / (alpha ** 0.5)
-        },
-        'empirical_moments': moments,
-        'n_observations': total_obs,
-        'n_customers': N,
-        'n_periods': T
-    }
-    
-    return make_serializable(metadata)
+    return df, states
 
+# --- Define the 4 Worlds ---
+# Persistence Matrix (Diagonals high)
+G = np.array([[0.92, 0.06, 0.02], [0.10, 0.80, 0.10], [0.05, 0.15, 0.80]])
 
-def main(output_dir):
-    """Generate all 20 simulation datasets"""
-    configs = []
-    seed_base = 42
+worlds = [
+    # World 1: Harbor (Low Sparsity, Light Tails)
+    WorldConfig("Harbor", "Low", "Light", 
+                np.array([0.90, 0.50, 0.15]), np.array([5, 25, 120]), np.array([4.0, 4.0, 4.0]), G),
     
-    # 16 core configs
-    sparsity = [(0.50, 0.693), (0.70, 0.357), (0.85, 0.163), (0.95, 0.051)]
-    Ns = [100, 200]
-    alphas = [2.0, 0.5]
-    
-    cell_id = 0
-    for pi0, lam in sparsity:
-        for N in Ns:
-            for alpha in alphas:
-                configs.append((lam, N, 50, alpha, 0.5, seed_base + cell_id))
-                cell_id += 1
-    
-    # 4 robustness
-    configs.extend([
-        (0.051, 100, 100, 0.5, 0.5, 200),
-        (0.693, 200, 50, 2.0, 1.0, 201),
-        (0.163, 100, 50, 2.0, 0.3, 202),
-        (0.357, 500, 50, 1.0, 0.5, 203)
-    ])
-    
-    print(f"Generating {len(configs)} datasets to {output_dir}")
-    print("=" * 60)
-    
-    all_meta = []
-    for i, (lam, N, T, alpha, beta, seed) in enumerate(configs, 1):
-        print(f"[{i}/{len(configs)}] lam={lam:.3f}, N={N}, alpha={alpha}")
-        meta = generate_one_dataset(lam, N, T, alpha, beta, seed, output_dir)
-        all_meta.append(meta)
-        print(f"      pi_0={meta['empirical_moments']['empirical_pi_0']:.3f}")
-    
-    # Save metadata
-    meta_path = Path(output_dir) / "simulation_metadata.json"
-    with open(meta_path, 'w') as f:
-        json.dump(all_meta, f, indent=2)
-    
-    print("=" * 60)
-    print(f"Done. Saved to {meta_path}")
+    # World 4: Cliff (High Sparsity, Heavy Tails)
+    WorldConfig("Cliff", "High", "Heavy", 
+                np.array([0.98, 0.85, 0.40]), np.array([2, 10, 80]), np.array([0.8, 0.7, 0.5]), G)
+]
 
-
-# RUN THIS
-if __name__ == "__main__":
-    OUTPUT_DIR = r"D:\Dropbox\research\SMC paper Feb2026\simul_data"
-    main(OUTPUT_DIR)
+# Run simulation for 'The Cliff'
+df_cliff, state_matrix = generate_hmm_data(worlds[1])
