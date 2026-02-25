@@ -9,48 +9,51 @@ import pandas as pd
 from dataclasses import dataclass
 from typing import Dict, List, Any
 import json
-from pathlib import Path
+from pathlib importPath
 
 
-def convert_to_native(obj: Any) -> Any:
-    """Convert numpy types to Python native types for JSON serialization"""
-    if isinstance(obj, np.integer):
-        return int(obj)
-    elif isinstance(obj, np.floating):
-        return float(obj)
+def to_python(obj: Any) -> Any:
+    """Aggressive conversion of numpy/pandas types to native Python"""
+    if hasattr(obj, 'item'):  # numpy scalar
+        return obj.item()
     elif isinstance(obj, np.ndarray):
         return obj.tolist()
+    elif isinstance(obj, (list, tuple)):
+        return [to_python(x) for x in obj]
     elif isinstance(obj, dict):
-        return {k: convert_to_native(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
-        return [convert_to_native(v) for v in obj]
-    elif isinstance(obj, tuple):
-        return [convert_to_native(v) for v in obj]
+        return {k: to_python(v) for k, v in obj.items()}
     return obj
 
 
 @dataclass
 class SimulationConfig:
     """Configuration for a single simulation cell"""
-    lam: float         # Poisson rate for purchase count (controls sparsity)
-    N: int             # sample size (100, 200)
-    T: int = 50        # time periods (fixed)
-    alpha: float = 2.0 # Gamma shape (controls skewness: low=2.0, high=0.5)
-    beta: float = 0.5  # Gamma rate
-    seed: int = 42     # reproducibility
+    lam: float
+    N: int
+    T: int = 50
+    alpha: float = 2.0
+    beta: float = 0.5
+    seed: int = 42
+    
+    def __post_init__(self):
+        # Ensure native types
+        self.lam = float(self.lam)
+        self.N = int(self.N)
+        self.T = int(self.T)
+        self.alpha = float(self.alpha)
+        self.beta = float(self.beta)
+        self.seed = int(self.seed)
     
     @property
     def pi_0(self) -> float:
-        """Derived structural zero probability: P(m=0) = exp(-lambda)"""
         return float(np.exp(-self.lam))
     
     @property
     def true_params(self) -> Dict[str, float]:
-        """Return true parameter dictionary"""
         return {
-            'lam': float(self.lam),
-            'alpha': float(self.alpha),
-            'beta': float(self.beta),
+            'lam': self.lam,
+            'alpha': self.alpha,
+            'beta': self.beta,
             'pi_0': self.pi_0,
             'mean_spend': float(self.alpha / self.beta),
             'var_spend': float(self.alpha / (self.beta ** 2)),
@@ -59,166 +62,122 @@ class SimulationConfig:
 
 
 def generate_tweedie_data(config: SimulationConfig) -> pd.DataFrame:
-    """
-    Vectorized compound Poisson-Gamma (Tweedie) data generation.
+    """Vectorized compound Poisson-Gamma (Tweedie) data generation"""
+    rng = np.random.default_rng(config.seed)
+    total_obs = config.N * config.T
     
-    DGP:
-        m ~ Poisson(lam)              # purchase count
-        y|m=0 = 0                      # structural zero
-        y|m>0 ~ Gamma(m*alpha, beta)   # sum of m purchases
-    
-    Vectorized for speed using NumPy's Generator API.
-    """
-    rng = np.random.default_rng(int(config.seed))
-    total_obs = int(config.N * config.T)
-    
-    # 1. Generate purchase counts (Poisson)
-    m = rng.poisson(float(config.lam), size=total_obs)
-    
-    # 2. Generate spend amounts (Gamma, vectorized)
+    m = rng.poisson(config.lam, size=total_obs)
     y = np.zeros(total_obs, dtype=float)
     pos_mask = m > 0
     
-    # For m>0: sum of m i.i.d. Gamma(alpha, beta) = Gamma(m*alpha, beta)
     if pos_mask.any():
-        y[pos_mask] = rng.gamma(
-            m[pos_mask].astype(float) * float(config.alpha),
-            1.0 / float(config.beta),  # numpy uses scale=1/rate
-            size=int(pos_mask.sum())
-        )
+        shape_params = (m[pos_mask] * config.alpha).astype(float)
+        y[pos_mask] = rng.gamma(shape_params, 1.0 / config.beta)
     
-    # 3. Construct DataFrame efficiently
     df = pd.DataFrame({
         'customer_id': np.repeat(np.arange(config.N), config.T),
         't': np.tile(np.arange(config.T), config.N),
         'y': y,
-        'purchase_count': m,
+        'purchase_count': m.astype(int),
         'is_zero': (m == 0).astype(int)
     })
     
-    # Add metadata columns for recovery tracking
-    df['lam_true'] = float(config.lam)
-    df['alpha_true'] = float(config.alpha)
-    df['beta_true'] = float(config.beta)
-    df['pi_0_true'] = float(config.pi_0)
+    df['lam_true'] = config.lam
+    df['alpha_true'] = config.alpha
+    df['beta_true'] = config.beta
+    df['pi_0_true'] = config.pi_0
     
     return df
 
 
-def compute_moments(df: pd.DataFrame) -> Dict[str, float]:
-    """Compute empirical moments for validation"""
-    y = df['y'].values
+def compute_moments(df: pd.DataFrame) -> Dict[str, Any]:
+    """Compute empirical moments - all native Python types"""
+    y = df['y'].to_numpy()
     y_pos = y[y > 0]
     
+    # Use .item() to force numpy scalar -> Python scalar
+    empirical_pi_0 = ((y == 0).mean()).item()
+    empirical_mean_purchases = (df['purchase_count'].to_numpy().mean()).item()
+    
+    if len(y_pos) > 0:
+        empirical_mean_spend = (y_pos.mean()).item()
+        empirical_var_spend = (y_pos.var(ddof=1)).item() if len(y_pos) > 1 else 0.0
+        # pandas skew returns float, but force it anyway
+        skew_val = pd.Series(y_pos).skew()
+        empirical_skew_spend = float(skew_val) if pd.notna(skew_val) else 0.0
+    else:
+        empirical_mean_spend = 0.0
+        empirical_var_spend = 0.0
+        empirical_skew_spend = 0.0
+    
     return {
-        'empirical_pi_0': float((y == 0).mean()),
-        'empirical_mean_purchases': float(df['purchase_count'].mean()),
-        'empirical_mean_spend': float(y_pos.mean()) if len(y_pos) > 0 else 0.0,
-        'empirical_var_spend': float(y_pos.var()) if len(y_pos) > 1 else 0.0,
-        'empirical_skew_spend': float(pd.Series(y_pos).skew()) if len(y_pos) > 2 else 0.0,
+        'empirical_pi_0': empirical_pi_0,
+        'empirical_mean_purchases': empirical_mean_purchases,
+        'empirical_mean_spend': empirical_mean_spend,
+        'empirical_var_spend': empirical_var_spend,
+        'empirical_skew_spend': empirical_skew_spend,
         'n_zeros': int((y == 0).sum()),
         'n_positive': int((y > 0).sum())
     }
 
 
 def create_simulation_grid() -> List[SimulationConfig]:
-    """
-    Create the 20-cell simulation grid:
-    - 4 sparsity levels (via lambda: 0.69, 0.36, 0.16, 0.05)
-    - 2 sample sizes (100, 200)
-    - 2 skewness levels (alpha: 2.0=low, 0.5=high)
-    
-    Total: 16 core cells + 4 robustness checks = 20 configurations
-    """
+    """Create 20-cell simulation grid"""
     configs = []
     seed_base = 42
     
-    # Sparsity levels: pi_0 = exp(-lambda)
-    sparsity_params = [
-        (0.50, 0.693),   # Moderate sparsity
-        (0.70, 0.357),   # High sparsity  
-        (0.85, 0.163),   # Very high sparsity
-        (0.95, 0.051)    # Extreme sparsity
-    ]
-    
-    # Sample sizes
+    sparsity_params = [(0.50, 0.693), (0.70, 0.357), (0.85, 0.163), (0.95, 0.051)]
     N_levels = [100, 200]
+    skew_params = [(2.0, 'low'), (0.5, 'high')]
     
-    # Skewness levels (via alpha)
-    skew_params = [
-        (2.0, 'low'),     # Skewness = 1.41
-        (0.5, 'high')     # Skewness = 2.83
-    ]
-    
-    # Generate 16 core configurations
     cell_id = 0
     for pi_0_target, lam in sparsity_params:
         for N in N_levels:
             for alpha, skew_label in skew_params:
                 configs.append(SimulationConfig(
-                    lam=float(lam),
-                    N=int(N),
-                    T=50,
-                    alpha=float(alpha),
-                    beta=0.5,
-                    seed=seed_base + cell_id
+                    lam=float(lam), N=int(N), T=50,
+                    alpha=float(alpha), beta=0.5, seed=seed_base + cell_id
                 ))
                 cell_id += 1
     
-    # 4 robustness checks with different parameters
-    robustness_configs = [
-        # Extreme sparsity + high skew + longer panel
+    # Robustness checks
+    configs.extend([
         SimulationConfig(lam=0.051, N=100, T=100, alpha=0.5, beta=0.5, seed=200),
-        # Moderate sparsity + low skew + different beta
         SimulationConfig(lam=0.693, N=200, T=50, alpha=2.0, beta=1.0, seed=201),
-        # High sparsity + low skew (unusual combination)
         SimulationConfig(lam=0.163, N=100, T=50, alpha=2.0, beta=0.3, seed=202),
-        # Very high N for scalability test
         SimulationConfig(lam=0.357, N=500, T=50, alpha=1.0, beta=0.5, seed=203)
-    ]
-    
-    configs.extend(robustness_configs)
+    ])
     
     return configs
 
 
-def run_simulation_cell(config: SimulationConfig, output_dir: str = "data/simulation") -> Dict:
-    """
-    Run single simulation cell and save data
-    
-    Returns metadata dictionary for tracking
-    """
-    # Create output directory
+def run_simulation_cell(config: SimulationConfig, output_dir: str) -> Dict:
+    """Run single simulation cell and save data"""
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
     
-    # Generate data
     df = generate_tweedie_data(config)
-    
-    # Compute moments
     moments = compute_moments(df)
     
-    # Save data
-    filename = (f"sim_lam{config.lam:.3f}_N{config.N}_T{config.T}_"
-                f"a{config.alpha:.1f}_b{config.beta:.1f}_seed{config.seed}.csv")
+    filename = f"sim_lam{config.lam:.3f}_N{config.N}_T{config.T}_a{config.alpha:.1f}_b{config.beta:.1f}_seed{config.seed}.csv"
     filepath = out_path / filename
     df.to_csv(filepath, index=False)
     
-    # Build metadata with native Python types only
+    # Build metadata with aggressive type conversion
     metadata = {
         'filename': str(filename),
         'filepath': str(filepath),
-        'config': {
-            'lam': float(config.lam),
-            'pi_0': float(config.pi_0),
-            'N': int(config.N),
-            'T': int(config.T),
-            'alpha': float(config.alpha),
-            'beta': float(config.beta),
-            'seed': int(config.seed)
-        },
-        'true_params': convert_to_native(config.true_params),
-        'empirical_moments': convert_to_native(moments),
+        'config': to_python({
+            'lam': config.lam,
+            'pi_0': config.pi_0,
+            'N': config.N,
+            'T': config.T,
+            'alpha': config.alpha,
+            'beta': config.beta,
+            'seed': config.seed
+        }),
+        'true_params': to_python(config.true_params),
+        'empirical_moments': to_python(moments),
         'n_observations': int(len(df)),
         'n_customers': int(config.N),
         'n_periods': int(config.T)
@@ -229,8 +188,7 @@ def run_simulation_cell(config: SimulationConfig, output_dir: str = "data/simula
 
 def generate_all_simulations(output_dir: str = "data/simulation",
                              metadata_file: str = "data/simulation_metadata.json"):
-    """Generate all 20 simulation cells and save metadata"""
-    
+    """Generate all 20 simulation cells"""
     configs = create_simulation_grid()
     all_metadata = []
     
@@ -238,76 +196,34 @@ def generate_all_simulations(output_dir: str = "data/simulation",
     print("=" * 70)
     
     for i, config in enumerate(configs, 1):
-        print(f"[{i:2d}/{len(configs)}] lam={config.lam:.3f} (pi_0={config.pi_0:.2f}), "
-              f"N={config.N}, alpha={config.alpha:.1f}")
+        print(f"[{i:2d}/{len(configs)}] lam={config.lam:.3f} (pi_0={config.pi_0:.2f}), N={config.N}, alpha={config.alpha:.1f}")
         
         metadata = run_simulation_cell(config, output_dir)
         all_metadata.append(metadata)
         
-        # Print quick summary
         emp = metadata['empirical_moments']
-        print(f"       Empirical pi_0: {emp['empirical_pi_0']:.3f} | "
-              f"Mean spend: {emp['empirical_mean_spend']:.2f} | "
-              f"Saved: {metadata['filename'][:50]}...")
+        print(f"       Empirical pi_0: {emp['empirical_pi_0']:.3f} | Mean spend: {emp['empirical_mean_spend']:.2f}")
     
-    # Save metadata with explicit conversion
+    # Save with default=str as final fallback
     meta_path = Path(metadata_file)
     meta_path.parent.mkdir(parents=True, exist_ok=True)
     
     with open(meta_path, 'w') as f:
-        json.dump(convert_to_native(all_metadata), f, indent=2)
+        json.dump(all_metadata, f, indent=2, default=lambda x: str(x) if hasattr(x, '__class__') and 'numpy' in str(type(x)) else x)
     
     print("=" * 70)
-    print(f"All simulations complete. Metadata saved to {metadata_file}")
-    
+    print(f"Complete. Metadata: {metadata_file}")
     return all_metadata
 
 
-def load_simulation_metadata(metadata_file: str = "data/simulation_metadata.json") -> List[Dict]:
-    """Load simulation metadata"""
-    with open(metadata_file, 'r') as f:
-        return json.load(f)
-
-
-def get_simulation_summary(metadata_file: str = "data/simulation_metadata.json") -> pd.DataFrame:
-    """Create summary table of all simulations"""
-    metadata = load_simulation_metadata(metadata_file)
-    
-    rows = []
-    for m in metadata:
-        rows.append({
-            'filename': m['filename'][:40],
-            'lam': m['config']['lam'],
-            'pi_0_true': m['config']['pi_0'],
-            'N': m['config']['N'],
-            'T': m['config']['T'],
-            'alpha': m['config']['alpha'],
-            'beta': m['config']['beta'],
-            'empirical_pi_0': m['empirical_moments']['empirical_pi_0'],
-            'empirical_skew': m['empirical_moments']['empirical_skew_spend'],
-            'n_obs': m['n_observations']
-        })
-    
-    return pd.DataFrame(rows)
-
-
 if __name__ == "__main__":
-    # Generate all simulations
-    metadata = generate_all_simulations()
+    # For Spyder: modify these paths
+    import os
+    OUTPUT_DIR = r"D:\Dropbox\research\SMC paper Feb2026\simul_data"
     
-    # Print summary
-    print("\n" + "=" * 70)
-    print("SIMULATION SUMMARY")
-    print("=" * 70)
-    summary = get_simulation_summary()
-    print(summary.to_string(index=False))
+    metadata = generate_all_simulations(output_dir=OUTPUT_DIR, 
+                                        metadata_file=os.path.join(OUTPUT_DIR, "simulation_metadata.json"))
     
-    # Print sparsity check
-    print("\n" + "=" * 70)
-    print("SPARSITY CHECK (True vs Empirical pi_0)")
-    print("=" * 70)
-    for m in metadata[:8]:  # First 8 only
-        true_pi0 = m['config']['pi_0']
-        emp_pi0 = m['empirical_moments']['empirical_pi_0']
-        print(f"Target: {true_pi0:.3f} | Empirical: {emp_pi0:.3f} | "
-              f"Diff: {abs(true_pi0 - emp_pi0):.4f}")
+    print("\nSummary:")
+    for m in metadata[:5]:
+        print(f"  {m['filename'][:50]}... pi_0={m['empirical_moments']['empirical_pi_0']:.3f}")
