@@ -1,0 +1,662 @@
+[
+  {
+    "filename": "sim_lam0.693_N100_T50_a2.0_b0.5_seed42.csv",
+    "config": {
+      "lam": 0.693,
+      "pi_0": 0.5000735956957677,
+      "N": 100,
+      "T": 50,
+      "alpha": 2.0,
+      "beta": 0.5,
+      "seed": 42
+    },
+    "true_params": {
+      "lam": 0.693,
+      "alpha": 2.0,
+      "beta": 0.5,
+      "pi_0": 0.5000735956957677,
+      "mean_spend": 4.0,
+      "var_spend": 8.0,
+      "skewness": 1.414213562373095
+    },
+    "empirical_moments": {
+      "empirical_pi_0": 0.5,
+      "empirical_mean_purchases": 0.6946,
+      "empirical_mean_spend": 5.541614877783357,
+      "empirical_var_spend": 19.527315422806655,
+      "empirical_skew_spend": 1.8331964307157582,
+      "n_zeros": 2500,
+      "n_positive": 2500
+    },
+    "n_observations": 5000,
+    "n_customers": 100,
+    "n_periods": 50
+  },
+  {
+    "filename": "sim_lam0.693_N100_T50_a0.5_b0.5_seed43.csv",
+    "config": {
+      "lam": 0.693,
+      "pi_0": 0.5000735956957677,
+      "N": 100,
+      "T": 50,
+      "alpha": 0.5,
+      "beta": 0.5,
+      "seed": 43
+    },
+    "true_params": {
+      "lam": 0.693,
+      "alpha": 0.5,
+      "beta": 0.5,
+      "pi_0": 0.5000735956957677,
+      "mean_spend": 1.0,
+      "var_spend": 2.0,
+      "skewness": 2.82842712474619
+    },
+    "empirical_moments": {
+      "empirical_pi_0": 0.4974,
+      "empirical_mean_purchases": 0.7046,
+      "empirical_mean_spend": 1.3993118310046777,
+      "empirical_var_spend": 3.0420453210831213,
+      "empirical_skew_spend": 2.1579350498052334,
+      "n_zeros": 2487,
+      "n_positive": 2513
+    },
+    "n_observations": 5000,
+    "n_customers": 100,
+    "n_periods": 50
+  },
+  {
+    "filename": "sim_lam0.693_N200_T50_a2.0_b0.5_seed44.csv",
+    "config": {
+      "lam": 0.693,
+      "pi_0": 0.5000735956957677,
+      "N": 200,
+      "T": 50,
+      "alpha": 2.0,
+      "beta": 0.5,
+      "seed": 44
+    },
+    "true_params": {
+      "lam": 0.693,
+      "alpha": 2.0,
+      "beta": 0.5,
+      "pi_0": 0.5000735956957677,
+      "mean_spend": 4.0,
+      "var_spend": 8.0,
+      "skewness": 1.414213562373095
+    },
+    "empirical_moments": {
+      "empirical_pi_0": 0.5074,
+      "empirical_mean_purchases": 0.6816,
+      "empirical_mean_spend": 5.469353884082347,
+      "empirical_var_spend": 17.046970347316602,
+      "empirical_skew_spend": 1.4390145223506146,
+      "n_zeros": 5074,
+      "n_positive": 4926
+    },
+    "n_observations": 10000,
+    "n_customers": 200,
+    "n_periods": 50
+  },
+  {
+    "filename": "sim_lam0.693_N200_T50_a0.5_b0.5_seed45.csv",
+    "config": {
+      "lam": 0.693,
+      "pi_0": 0.5000735956957677,
+      "N": 200,
+      "T": 50,
+      "alpha": 0.5,
+      "beta": 0.5,
+      "seed": 45
+    },
+    "true_params": {
+      "lam": 0.693,
+      "alpha": 0.5,
+      "beta": 0.5,
+      "pi_0": 0.5000735956957677,
+      "mean_spend": 1.0,
+      "var_spend": 2.0,
+      "skewness": 2.82842712474619
+    },
+    "empirical_moments": {
+      "empirical_pi_0": 0.5004,
+      "empirical_mean_purchases": 0.6975,
+      "empirical_mean_spend": 1.4057127234666575,
+      "empirical_var_spend": 3.1864005255154724,
+      "empirical_skew_spend": 2.334481412631025,
+      "n_zeros": 5004,
+      "n_positive": 4996
+    },
+    "n_observations": 10000,
+    "n_customers": 200,
+    "n_periods": 50
+  },
+  {
+    "filename": "sim_lam0.357_N100_T50_a2.0_b0.5_seed46.csv",
+    "config": {
+      "lam": 0.357,
+      "pi_0": 0.699772497734611,
+      "N": 100,
+      "T": 50,
+      "alpha": 2.0,
+      "beta": 0.5,
+      "seed": 46
+    },
+    "true_params": {
+      "lam": 0.357,
+      "alpha": 2.0,
+      "beta": 0.5,
+      "pi_0": 0.699772497734611,
+      "mean_spend": 4.0,
+      "var_spend": 8.0,
+      "skewness": 1.414213562373095
+    },
+    "empirical_moments": {
+      "empirical_pi_0": 0.6962,
+      "empirical_mean_purchases": 0.3598,
+      "empirical_mean_spend": 4.752812916970337,
+      "empirical_var_spend": 12.882982765884988,
+      "empirical_skew_spend": 1.6883798644205061,
+      "n_zeros": 3481,
+      "n_positive": 1519
+    },
+    "n_observations": 5000,
+    "n_customers": 100,
+    "n_periods": 50
+  },
+  {
+    "filename": "sim_lam0.357_N100_T50_a0.5_b0.5_seed47.csv",
+    "config": {
+      "lam": 0.357,
+      "pi_0": 0.699772497734611,
+      "N": 100,
+      "T": 50,
+      "alpha": 0.5,
+      "beta": 0.5,
+      "seed": 47
+    },
+    "true_params": {
+      "lam": 0.357,
+      "alpha": 0.5,
+      "beta": 0.5,
+      "pi_0": 0.699772497734611,
+      "mean_spend": 1.0,
+      "var_spend": 2.0,
+      "skewness": 2.82842712474619
+    },
+    "empirical_moments": {
+      "empirical_pi_0": 0.6918,
+      "empirical_mean_purchases": 0.374,
+      "empirical_mean_spend": 1.1802559861489061,
+      "empirical_var_spend": 2.6813914475367633,
+      "empirical_skew_spend": 2.838390386172037,
+      "n_zeros": 3459,
+      "n_positive": 1541
+    },
+    "n_observations": 5000,
+    "n_customers": 100,
+    "n_periods": 50
+  },
+  {
+    "filename": "sim_lam0.357_N200_T50_a2.0_b0.5_seed48.csv",
+    "config": {
+      "lam": 0.357,
+      "pi_0": 0.699772497734611,
+      "N": 200,
+      "T": 50,
+      "alpha": 2.0,
+      "beta": 0.5,
+      "seed": 48
+    },
+    "true_params": {
+      "lam": 0.357,
+      "alpha": 2.0,
+      "beta": 0.5,
+      "pi_0": 0.699772497734611,
+      "mean_spend": 4.0,
+      "var_spend": 8.0,
+      "skewness": 1.414213562373095
+    },
+    "empirical_moments": {
+      "empirical_pi_0": 0.6945,
+      "empirical_mean_purchases": 0.3647,
+      "empirical_mean_spend": 4.828489491425462,
+      "empirical_var_spend": 14.389111324856879,
+      "empirical_skew_spend": 1.73428732965617,
+      "n_zeros": 6945,
+      "n_positive": 3055
+    },
+    "n_observations": 10000,
+    "n_customers": 200,
+    "n_periods": 50
+  },
+  {
+    "filename": "sim_lam0.357_N200_T50_a0.5_b0.5_seed49.csv",
+    "config": {
+      "lam": 0.357,
+      "pi_0": 0.699772497734611,
+      "N": 200,
+      "T": 50,
+      "alpha": 0.5,
+      "beta": 0.5,
+      "seed": 49
+    },
+    "true_params": {
+      "lam": 0.357,
+      "alpha": 0.5,
+      "beta": 0.5,
+      "pi_0": 0.699772497734611,
+      "mean_spend": 1.0,
+      "var_spend": 2.0,
+      "skewness": 2.82842712474619
+    },
+    "empirical_moments": {
+      "empirical_pi_0": 0.6945,
+      "empirical_mean_purchases": 0.3615,
+      "empirical_mean_spend": 1.1806080455975028,
+      "empirical_var_spend": 2.491593637834704,
+      "empirical_skew_spend": 2.2542575583743,
+      "n_zeros": 6945,
+      "n_positive": 3055
+    },
+    "n_observations": 10000,
+    "n_customers": 200,
+    "n_periods": 50
+  },
+  {
+    "filename": "sim_lam0.163_N100_T50_a2.0_b0.5_seed50.csv",
+    "config": {
+      "lam": 0.163,
+      "pi_0": 0.8495911884145902,
+      "N": 100,
+      "T": 50,
+      "alpha": 2.0,
+      "beta": 0.5,
+      "seed": 50
+    },
+    "true_params": {
+      "lam": 0.163,
+      "alpha": 2.0,
+      "beta": 0.5,
+      "pi_0": 0.8495911884145902,
+      "mean_spend": 4.0,
+      "var_spend": 8.0,
+      "skewness": 1.414213562373095
+    },
+    "empirical_moments": {
+      "empirical_pi_0": 0.8488,
+      "empirical_mean_purchases": 0.1638,
+      "empirical_mean_spend": 4.184289904758251,
+      "empirical_var_spend": 9.282628240400811,
+      "empirical_skew_spend": 1.323232562535909,
+      "n_zeros": 4244,
+      "n_positive": 756
+    },
+    "n_observations": 5000,
+    "n_customers": 100,
+    "n_periods": 50
+  },
+  {
+    "filename": "sim_lam0.163_N100_T50_a0.5_b0.5_seed51.csv",
+    "config": {
+      "lam": 0.163,
+      "pi_0": 0.8495911884145902,
+      "N": 100,
+      "T": 50,
+      "alpha": 0.5,
+      "beta": 0.5,
+      "seed": 51
+    },
+    "true_params": {
+      "lam": 0.163,
+      "alpha": 0.5,
+      "beta": 0.5,
+      "pi_0": 0.8495911884145902,
+      "mean_spend": 1.0,
+      "var_spend": 2.0,
+      "skewness": 2.82842712474619
+    },
+    "empirical_moments": {
+      "empirical_pi_0": 0.8426,
+      "empirical_mean_purchases": 0.1686,
+      "empirical_mean_spend": 1.0619762133773678,
+      "empirical_var_spend": 2.1239885433204555,
+      "empirical_skew_spend": 2.343021504688727,
+      "n_zeros": 4213,
+      "n_positive": 787
+    },
+    "n_observations": 5000,
+    "n_customers": 100,
+    "n_periods": 50
+  },
+  {
+    "filename": "sim_lam0.163_N200_T50_a2.0_b0.5_seed52.csv",
+    "config": {
+      "lam": 0.163,
+      "pi_0": 0.8495911884145902,
+      "N": 200,
+      "T": 50,
+      "alpha": 2.0,
+      "beta": 0.5,
+      "seed": 52
+    },
+    "true_params": {
+      "lam": 0.163,
+      "alpha": 2.0,
+      "beta": 0.5,
+      "pi_0": 0.8495911884145902,
+      "mean_spend": 4.0,
+      "var_spend": 8.0,
+      "skewness": 1.414213562373095
+    },
+    "empirical_moments": {
+      "empirical_pi_0": 0.8499,
+      "empirical_mean_purchases": 0.1643,
+      "empirical_mean_spend": 4.585620191978106,
+      "empirical_var_spend": 10.967255635920907,
+      "empirical_skew_spend": 1.524528782609703,
+      "n_zeros": 8499,
+      "n_positive": 1501
+    },
+    "n_observations": 10000,
+    "n_customers": 200,
+    "n_periods": 50
+  },
+  {
+    "filename": "sim_lam0.163_N200_T50_a0.5_b0.5_seed53.csv",
+    "config": {
+      "lam": 0.163,
+      "pi_0": 0.8495911884145902,
+      "N": 200,
+      "T": 50,
+      "alpha": 0.5,
+      "beta": 0.5,
+      "seed": 53
+    },
+    "true_params": {
+      "lam": 0.163,
+      "alpha": 0.5,
+      "beta": 0.5,
+      "pi_0": 0.8495911884145902,
+      "mean_spend": 1.0,
+      "var_spend": 2.0,
+      "skewness": 2.82842712474619
+    },
+    "empirical_moments": {
+      "empirical_pi_0": 0.8492,
+      "empirical_mean_purchases": 0.1635,
+      "empirical_mean_spend": 1.0526278583600432,
+      "empirical_var_spend": 2.1126567892041086,
+      "empirical_skew_spend": 2.6915131078590724,
+      "n_zeros": 8492,
+      "n_positive": 1508
+    },
+    "n_observations": 10000,
+    "n_customers": 200,
+    "n_periods": 50
+  },
+  {
+    "filename": "sim_lam0.051_N100_T50_a2.0_b0.5_seed54.csv",
+    "config": {
+      "lam": 0.051,
+      "pi_0": 0.950278670532427,
+      "N": 100,
+      "T": 50,
+      "alpha": 2.0,
+      "beta": 0.5,
+      "seed": 54
+    },
+    "true_params": {
+      "lam": 0.051,
+      "alpha": 2.0,
+      "beta": 0.5,
+      "pi_0": 0.950278670532427,
+      "mean_spend": 4.0,
+      "var_spend": 8.0,
+      "skewness": 1.414213562373095
+    },
+    "empirical_moments": {
+      "empirical_pi_0": 0.9506,
+      "empirical_mean_purchases": 0.052,
+      "empirical_mean_spend": 3.842622158223041,
+      "empirical_var_spend": 7.752538369936746,
+      "empirical_skew_spend": 1.373892980462341,
+      "n_zeros": 4753,
+      "n_positive": 247
+    },
+    "n_observations": 5000,
+    "n_customers": 100,
+    "n_periods": 50
+  },
+  {
+    "filename": "sim_lam0.051_N100_T50_a0.5_b0.5_seed55.csv",
+    "config": {
+      "lam": 0.051,
+      "pi_0": 0.950278670532427,
+      "N": 100,
+      "T": 50,
+      "alpha": 0.5,
+      "beta": 0.5,
+      "seed": 55
+    },
+    "true_params": {
+      "lam": 0.051,
+      "alpha": 0.5,
+      "beta": 0.5,
+      "pi_0": 0.950278670532427,
+      "mean_spend": 1.0,
+      "var_spend": 2.0,
+      "skewness": 2.82842712474619
+    },
+    "empirical_moments": {
+      "empirical_pi_0": 0.949,
+      "empirical_mean_purchases": 0.0524,
+      "empirical_mean_spend": 0.9405403408407513,
+      "empirical_var_spend": 1.9973295916436393,
+      "empirical_skew_spend": 5.421096788266831,
+      "n_zeros": 4745,
+      "n_positive": 255
+    },
+    "n_observations": 5000,
+    "n_customers": 100,
+    "n_periods": 50
+  },
+  {
+    "filename": "sim_lam0.051_N200_T50_a2.0_b0.5_seed56.csv",
+    "config": {
+      "lam": 0.051,
+      "pi_0": 0.950278670532427,
+      "N": 200,
+      "T": 50,
+      "alpha": 2.0,
+      "beta": 0.5,
+      "seed": 56
+    },
+    "true_params": {
+      "lam": 0.051,
+      "alpha": 2.0,
+      "beta": 0.5,
+      "pi_0": 0.950278670532427,
+      "mean_spend": 4.0,
+      "var_spend": 8.0,
+      "skewness": 1.414213562373095
+    },
+    "empirical_moments": {
+      "empirical_pi_0": 0.9516,
+      "empirical_mean_purchases": 0.0499,
+      "empirical_mean_spend": 4.139311927047785,
+      "empirical_var_spend": 9.071620101133316,
+      "empirical_skew_spend": 1.6530620656301933,
+      "n_zeros": 9516,
+      "n_positive": 484
+    },
+    "n_observations": 10000,
+    "n_customers": 200,
+    "n_periods": 50
+  },
+  {
+    "filename": "sim_lam0.051_N200_T50_a0.5_b0.5_seed57.csv",
+    "config": {
+      "lam": 0.051,
+      "pi_0": 0.950278670532427,
+      "N": 200,
+      "T": 50,
+      "alpha": 0.5,
+      "beta": 0.5,
+      "seed": 57
+    },
+    "true_params": {
+      "lam": 0.051,
+      "alpha": 0.5,
+      "beta": 0.5,
+      "pi_0": 0.950278670532427,
+      "mean_spend": 1.0,
+      "var_spend": 2.0,
+      "skewness": 2.82842712474619
+    },
+    "empirical_moments": {
+      "empirical_pi_0": 0.9503,
+      "empirical_mean_purchases": 0.0508,
+      "empirical_mean_spend": 1.0939199263664163,
+      "empirical_var_spend": 2.559379971935715,
+      "empirical_skew_spend": 2.6720693250265835,
+      "n_zeros": 9503,
+      "n_positive": 497
+    },
+    "n_observations": 10000,
+    "n_customers": 200,
+    "n_periods": 50
+  },
+  {
+    "filename": "sim_lam0.051_N100_T100_a0.5_b0.5_seed200.csv",
+    "config": {
+      "lam": 0.051,
+      "pi_0": 0.950278670532427,
+      "N": 100,
+      "T": 100,
+      "alpha": 0.5,
+      "beta": 0.5,
+      "seed": 200
+    },
+    "true_params": {
+      "lam": 0.051,
+      "alpha": 0.5,
+      "beta": 0.5,
+      "pi_0": 0.950278670532427,
+      "mean_spend": 1.0,
+      "var_spend": 2.0,
+      "skewness": 2.82842712474619
+    },
+    "empirical_moments": {
+      "empirical_pi_0": 0.9501,
+      "empirical_mean_purchases": 0.0514,
+      "empirical_mean_spend": 1.0519975449479004,
+      "empirical_var_spend": 2.078032277548438,
+      "empirical_skew_spend": 2.862164174465295,
+      "n_zeros": 9501,
+      "n_positive": 499
+    },
+    "n_observations": 10000,
+    "n_customers": 100,
+    "n_periods": 100
+  },
+  {
+    "filename": "sim_lam0.693_N200_T50_a2.0_b1.0_seed201.csv",
+    "config": {
+      "lam": 0.693,
+      "pi_0": 0.5000735956957677,
+      "N": 200,
+      "T": 50,
+      "alpha": 2.0,
+      "beta": 1.0,
+      "seed": 201
+    },
+    "true_params": {
+      "lam": 0.693,
+      "alpha": 2.0,
+      "beta": 1.0,
+      "pi_0": 0.5000735956957677,
+      "mean_spend": 2.0,
+      "var_spend": 2.0,
+      "skewness": 1.414213562373095
+    },
+    "empirical_moments": {
+      "empirical_pi_0": 0.508,
+      "empirical_mean_purchases": 0.6804,
+      "empirical_mean_spend": 2.7281744906441485,
+      "empirical_var_spend": 4.340144528617727,
+      "empirical_skew_spend": 1.538842057642088,
+      "n_zeros": 5080,
+      "n_positive": 4920
+    },
+    "n_observations": 10000,
+    "n_customers": 200,
+    "n_periods": 50
+  },
+  {
+    "filename": "sim_lam0.163_N100_T50_a2.0_b0.3_seed202.csv",
+    "config": {
+      "lam": 0.163,
+      "pi_0": 0.8495911884145902,
+      "N": 100,
+      "T": 50,
+      "alpha": 2.0,
+      "beta": 0.3,
+      "seed": 202
+    },
+    "true_params": {
+      "lam": 0.163,
+      "alpha": 2.0,
+      "beta": 0.3,
+      "pi_0": 0.8495911884145902,
+      "mean_spend": 6.666666666666667,
+      "var_spend": 22.22222222222222,
+      "skewness": 1.414213562373095
+    },
+    "empirical_moments": {
+      "empirical_pi_0": 0.8516,
+      "empirical_mean_purchases": 0.1596,
+      "empirical_mean_spend": 7.035892151837518,
+      "empirical_var_spend": 27.65743643228047,
+      "empirical_skew_spend": 1.556519836521759,
+      "n_zeros": 4258,
+      "n_positive": 742
+    },
+    "n_observations": 5000,
+    "n_customers": 100,
+    "n_periods": 50
+  },
+  {
+    "filename": "sim_lam0.357_N500_T50_a1.0_b0.5_seed203.csv",
+    "config": {
+      "lam": 0.357,
+      "pi_0": 0.699772497734611,
+      "N": 500,
+      "T": 50,
+      "alpha": 1.0,
+      "beta": 0.5,
+      "seed": 203
+    },
+    "true_params": {
+      "lam": 0.357,
+      "alpha": 1.0,
+      "beta": 0.5,
+      "pi_0": 0.699772497734611,
+      "mean_spend": 2.0,
+      "var_spend": 4.0,
+      "skewness": 2.0
+    },
+    "empirical_moments": {
+      "empirical_pi_0": 0.70052,
+      "empirical_mean_purchases": 0.35644,
+      "empirical_mean_spend": 2.3744800729132374,
+      "empirical_var_spend": 5.3624401359785585,
+      "empirical_skew_spend": 1.8015152600568394,
+      "n_zeros": 17513,
+      "n_positive": 7487
+    },
+    "n_observations": 25000,
+    "n_customers": 500,
+    "n_periods": 50
+  }
+]
