@@ -7,9 +7,26 @@ Plus 4 robustness checks = 24 total configurations
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Any
 import json
 from pathlib import Path
+
+
+def convert_to_native(obj: Any) -> Any:
+    """Convert numpy types to Python native types for JSON serialization"""
+    if isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, dict):
+        return {k: convert_to_native(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_to_native(v) for v in obj]
+    elif isinstance(obj, tuple):
+        return [convert_to_native(v) for v in obj]
+    return obj
 
 
 @dataclass
@@ -25,19 +42,19 @@ class SimulationConfig:
     @property
     def pi_0(self) -> float:
         """Derived structural zero probability: P(m=0) = exp(-lambda)"""
-        return np.exp(-self.lam)
+        return float(np.exp(-self.lam))
     
     @property
     def true_params(self) -> Dict[str, float]:
         """Return true parameter dictionary"""
         return {
-            'lam': self.lam,
-            'alpha': self.alpha,
-            'beta': self.beta,
+            'lam': float(self.lam),
+            'alpha': float(self.alpha),
+            'beta': float(self.beta),
             'pi_0': self.pi_0,
-            'mean_spend': self.alpha / self.beta,
-            'var_spend': self.alpha / (self.beta ** 2),
-            'skewness': 2 / np.sqrt(self.alpha)
+            'mean_spend': float(self.alpha / self.beta),
+            'var_spend': float(self.alpha / (self.beta ** 2)),
+            'skewness': float(2 / np.sqrt(self.alpha))
         }
 
 
@@ -52,22 +69,22 @@ def generate_tweedie_data(config: SimulationConfig) -> pd.DataFrame:
     
     Vectorized for speed using NumPy's Generator API.
     """
-    rng = np.random.default_rng(config.seed)
-    total_obs = config.N * config.T
+    rng = np.random.default_rng(int(config.seed))
+    total_obs = int(config.N * config.T)
     
     # 1. Generate purchase counts (Poisson)
-    m = rng.poisson(config.lam, size=total_obs)
+    m = rng.poisson(float(config.lam), size=total_obs)
     
     # 2. Generate spend amounts (Gamma, vectorized)
-    y = np.zeros(total_obs)
+    y = np.zeros(total_obs, dtype=float)
     pos_mask = m > 0
     
     # For m>0: sum of m i.i.d. Gamma(alpha, beta) = Gamma(m*alpha, beta)
     if pos_mask.any():
         y[pos_mask] = rng.gamma(
-            m[pos_mask] * config.alpha,
-            1 / config.beta,  # numpy uses scale=1/rate
-            size=pos_mask.sum()
+            m[pos_mask].astype(float) * float(config.alpha),
+            1.0 / float(config.beta),  # numpy uses scale=1/rate
+            size=int(pos_mask.sum())
         )
     
     # 3. Construct DataFrame efficiently
@@ -80,10 +97,10 @@ def generate_tweedie_data(config: SimulationConfig) -> pd.DataFrame:
     })
     
     # Add metadata columns for recovery tracking
-    df['lam_true'] = config.lam
-    df['alpha_true'] = config.alpha
-    df['beta_true'] = config.beta
-    df['pi_0_true'] = config.pi_0
+    df['lam_true'] = float(config.lam)
+    df['alpha_true'] = float(config.alpha)
+    df['beta_true'] = float(config.beta)
+    df['pi_0_true'] = float(config.pi_0)
     
     return df
 
@@ -94,13 +111,13 @@ def compute_moments(df: pd.DataFrame) -> Dict[str, float]:
     y_pos = y[y > 0]
     
     return {
-        'empirical_pi_0': (y == 0).mean(),
-        'empirical_mean_purchases': df['purchase_count'].mean(),
-        'empirical_mean_spend': y_pos.mean() if len(y_pos) > 0 else 0.0,
-        'empirical_var_spend': y_pos.var() if len(y_pos) > 1 else 0.0,
-        'empirical_skew_spend': pd.Series(y_pos).skew() if len(y_pos) > 2 else 0.0,
-        'n_zeros': (y == 0).sum(),
-        'n_positive': (y > 0).sum()
+        'empirical_pi_0': float((y == 0).mean()),
+        'empirical_mean_purchases': float(df['purchase_count'].mean()),
+        'empirical_mean_spend': float(y_pos.mean()) if len(y_pos) > 0 else 0.0,
+        'empirical_var_spend': float(y_pos.var()) if len(y_pos) > 1 else 0.0,
+        'empirical_skew_spend': float(pd.Series(y_pos).skew()) if len(y_pos) > 2 else 0.0,
+        'n_zeros': int((y == 0).sum()),
+        'n_positive': int((y > 0).sum())
     }
 
 
@@ -117,7 +134,6 @@ def create_simulation_grid() -> List[SimulationConfig]:
     seed_base = 42
     
     # Sparsity levels: pi_0 = exp(-lambda)
-    # pi_0=0.50 -> lam=0.693, pi_0=0.70 -> lam=0.357, etc.
     sparsity_params = [
         (0.50, 0.693),   # Moderate sparsity
         (0.70, 0.357),   # High sparsity  
@@ -140,10 +156,10 @@ def create_simulation_grid() -> List[SimulationConfig]:
         for N in N_levels:
             for alpha, skew_label in skew_params:
                 configs.append(SimulationConfig(
-                    lam=lam,
-                    N=N,
+                    lam=float(lam),
+                    N=int(N),
                     T=50,
-                    alpha=alpha,
+                    alpha=float(alpha),
                     beta=0.5,
                     seed=seed_base + cell_id
                 ))
@@ -188,24 +204,24 @@ def run_simulation_cell(config: SimulationConfig, output_dir: str = "data/simula
     filepath = out_path / filename
     df.to_csv(filepath, index=False)
     
-    # Return metadata
+    # Build metadata with native Python types only
     metadata = {
         'filename': str(filename),
         'filepath': str(filepath),
         'config': {
-            'lam': config.lam,
-            'pi_0': config.pi_0,
-            'N': config.N,
-            'T': config.T,
-            'alpha': config.alpha,
-            'beta': config.beta,
-            'seed': config.seed
+            'lam': float(config.lam),
+            'pi_0': float(config.pi_0),
+            'N': int(config.N),
+            'T': int(config.T),
+            'alpha': float(config.alpha),
+            'beta': float(config.beta),
+            'seed': int(config.seed)
         },
-        'true_params': config.true_params,
-        'empirical_moments': moments,
-        'n_observations': len(df),
-        'n_customers': config.N,
-        'n_periods': config.T
+        'true_params': convert_to_native(config.true_params),
+        'empirical_moments': convert_to_native(moments),
+        'n_observations': int(len(df)),
+        'n_customers': int(config.N),
+        'n_periods': int(config.T)
     }
     
     return metadata
@@ -234,12 +250,12 @@ def generate_all_simulations(output_dir: str = "data/simulation",
               f"Mean spend: {emp['empirical_mean_spend']:.2f} | "
               f"Saved: {metadata['filename'][:50]}...")
     
-    # Save metadata
+    # Save metadata with explicit conversion
     meta_path = Path(metadata_file)
     meta_path.parent.mkdir(parents=True, exist_ok=True)
     
     with open(meta_path, 'w') as f:
-        json.dump(all_metadata, f, indent=2)
+        json.dump(convert_to_native(all_metadata), f, indent=2)
     
     print("=" * 70)
     print(f"All simulations complete. Metadata saved to {metadata_file}")
@@ -295,4 +311,3 @@ if __name__ == "__main__":
         emp_pi0 = m['empirical_moments']['empirical_pi_0']
         print(f"Target: {true_pi0:.3f} | Empirical: {emp_pi0:.3f} | "
               f"Diff: {abs(true_pi0 - emp_pi0):.4f}")
-      
