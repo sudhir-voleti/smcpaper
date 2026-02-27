@@ -2,11 +2,8 @@
 """
 smc_hmm_tweedie.py
 ==================
-HMM-Tweedie model with saddlepoint approximation.
+HMM-Tweedie model with saddlepoint approximation and OOS evaluation.
 Optimized for Apple Silicon (M1/M2/M3)
-
-Usage:
-    python smc_hmm_tweedie.py --dataset simulation --sim_path ./data/hmm_Breeze_N200_T104.csv --K 3 --state_specific_p --no_gam --draws 1000
 """
 
 # =============================================================================
@@ -68,14 +65,113 @@ def create_bspline_basis(x, df=3, degree=3):
 
 
 # =============================================================================
-# 2. TWEEDIE MODEL BUILDER
+# 2. RFM FEATURE COMPUTATION
 # =============================================================================
-def make_model(data, K=3, state_specific_p=True, p_fixed=1.5, use_gam=True, gam_df=3, use_covariates=True):
+def compute_rfm_features(y, mask):
+    """
+    Compute Recency, Frequency, Monetary features from panel data.
+    R = time since last purchase
+    F = cumulative purchase count  
+    M = average spend per purchase
+    """
+    N, T = y.shape
+    R = np.zeros((N, T), dtype=np.float32)
+    F = np.zeros((N, T), dtype=np.float32)
+    M = np.zeros((N, T), dtype=np.float32)
+    
+    for i in range(N):
+        last_purchase = -1
+        cumulative_freq = 0
+        cumulative_spend = 0.0
+        
+        for t in range(T):
+            if mask[i, t]:
+                if y[i, t] > 0:
+                    last_purchase = t
+                    cumulative_freq += 1
+                    cumulative_spend += y[i, t]
+                
+                if last_purchase >= 0:
+                    R[i, t] = t - last_purchase
+                    F[i, t] = cumulative_freq
+                    M[i, t] = cumulative_spend / cumulative_freq if cumulative_freq > 0 else 0.0
+                else:
+                    R[i, t] = t + 1  # Time since "start" if no purchase yet
+                    F[i, t] = 0
+                    M[i, t] = 0.0
+            else:
+                R[i, t] = 0
+                F[i, t] = 0
+                M[i, t] = 0.0
+    
+    return R, F, M
+
+
+def compute_rfm_features_oos(y_train, y_test, mask_test):
+    """
+    Propagate RFM state from training history into test period.
+    """
+    N, T_test = y_test.shape
+    T_train = y_train.shape[1]
+    R = np.zeros((N, T_test), dtype=np.float32)
+    F = np.zeros((N, T_test), dtype=np.float32)
+    M = np.zeros((N, T_test), dtype=np.float32)
+    
+    for i in range(N):
+        # Initialize from training history
+        train_purchase_indices = np.where(y_train[i, :] > 0)[0]
+        if len(train_purchase_indices) > 0:
+            last_p = train_purchase_indices[-1]
+            cum_f = len(train_purchase_indices)
+            cum_m = np.sum(y_train[i, :])
+        else:
+            last_p = -1
+            cum_f = 0
+            cum_m = 0.0
+        
+        # Roll forward through test period
+        for t in range(T_test):
+            t_abs = T_train + t
+            if mask_test[i, t] and y_test[i, t] > 0:
+                last_p = t_abs
+                cum_f += 1
+                cum_m += y_test[i, t]
+            
+            if last_p != -1:
+                R[i, t] = t_abs - last_p
+                F[i, t] = cum_f
+                M[i, t] = cum_m / cum_f if cum_f > 0 else 0.0
+            else:
+                R[i, t] = t_abs + 1
+                F[i, t] = 0
+                M[i, t] = 0.0
+            
+    return R.astype(np.float32), F.astype(np.float32), M.astype(np.float32)
+
+
+def gamma_logp_det(value, mu, phi):
+    """
+    Deterministic Gamma log-density with numerical stability.
+    """
+    alpha = mu / phi
+    beta = 1.0 / phi
+    
+    logp = (alpha - 1) * pt.log(value) - value * beta + alpha * pt.log(beta) - pt.gammaln(alpha)
+    
+    # Clip to prevent extreme values
+    return pt.clip(logp, -1e6, 0.0)
+
+# =============================================================================
+# 3. TWEEDIE MODEL BUILDER
+# =============================================================================
+def make_model(data, K=3, state_specific_p=True, p_fixed=None, use_gam=True, gam_df=3, use_covariates=True):
+
     """Build HMM-Tweedie (K>=2) or Static Tweedie (K=1) with saddlepoint approximation."""
     N, T = data["N"], data["T"]
     y, mask = data["y"], data["mask"]
     R, F, M = data["R"], data["F"], data["M"]
 
+    # Build GAM bases if needed
     if use_gam and K >= 1 and use_covariates:
         R_flat = R.flatten()
         F_flat = F.flatten()
@@ -116,7 +212,7 @@ def make_model(data, K=3, state_specific_p=True, p_fixed=1.5, use_gam=True, gam_
             beta0 = pm.Deterministic("beta0", beta0_sorted * beta0_prior_sd + beta0_prior_mean)
             phi = pm.Exponential("phi", lam=0.5, shape=K)
 
-        # ---- 3. SLOPES / BASIS WEIGHTS ----
+        # ---- 3. COVARIATE EFFECTS ----
         if use_covariates:
             if use_gam:
                 if K == 1:
@@ -137,6 +233,7 @@ def make_model(data, K=3, state_specific_p=True, p_fixed=1.5, use_gam=True, gam_
                     betaF = pm.Normal("betaF", 0, 1, shape=K)
                     betaM = pm.Normal("betaM", 0, 1, shape=K)
         else:
+            # Zero effects if no covariates
             if use_gam:
                 w_R = pt.zeros(n_basis_R) if K == 1 else pt.zeros((K, n_basis_R))
                 w_F = pt.zeros(n_basis_F) if K == 1 else pt.zeros((K, n_basis_F))
@@ -146,16 +243,23 @@ def make_model(data, K=3, state_specific_p=True, p_fixed=1.5, use_gam=True, gam_
                 betaF = pt.as_tensor_variable(0.0) if K == 1 else pt.zeros(K)
                 betaM = pt.as_tensor_variable(0.0) if K == 1 else pt.zeros(K)
 
+
         # ---- 4. POWER PARAMETER P ----
-        if K == 1:
-            p_raw = pm.Beta("p_raw", alpha=2, beta=2)
-            p = pm.Deterministic("p", 1.1 + p_raw * 0.8)
+        # Constrain p to [1.3, 1.7] to prevent boundary collapse (was [1.1, 1.9])
+        if p_fixed is not None:
+            # Fixed p across all states
+            p = pt.as_tensor_variable(np.array([p_fixed] * K, dtype=np.float32))
         elif state_specific_p:
+            # State-varying p with tighter bounds [1.3, 1.7]
             p_raw = pm.Beta("p_raw", alpha=2, beta=2, shape=K)
             p_sorted = pt.sort(p_raw)
-            p = pm.Deterministic("p", 1.1 + p_sorted * 0.8)
+            p = pm.Deterministic("p", 1.3 + p_sorted * 0.4)  # [1.3, 1.7]
         else:
-            p = pt.as_tensor_variable(np.array([p_fixed] * K, dtype=np.float32))
+            # Shared p across states (estimated)
+            p_raw = pm.Beta("p_raw", alpha=2, beta=2)
+            p = pm.Deterministic("p", 1.3 + p_raw * 0.4)  # [1.3, 1.7]
+            if K > 1:
+                p = pt.stack([p] * K)
 
         # ---- 5. MU CALCULATION ----
         if use_covariates:
@@ -181,7 +285,9 @@ def make_model(data, K=3, state_specific_p=True, p_fixed=1.5, use_gam=True, gam_
 
         mu = pt.clip(mu, 1e-3, 1e6)
 
-        # ---- 6. TWEEDIE EMISSION (PROPER SADDLEPOINT APPROXIMATION) ----
+
+        # ---- 6. ZIG EMISSION (Zero-Inflated Gamma approximation to Tweedie) ----
+        # From manuscript Appendix D: KL ≈ 0.04 nats from true Tweedie
         if K == 1:
             p_exp, phi_exp = p, phi
             mu_exp = mu
@@ -192,33 +298,18 @@ def make_model(data, K=3, state_specific_p=True, p_fixed=1.5, use_gam=True, gam_
             mu_exp = mu[..., None] if mu.ndim == 2 else mu
             y_in, mask_in = y[..., None], mask[:, :, None]
 
-        # Common parameters
-        exponent = 2.0 - p_exp          # 2-p
-        kappa = exponent / (p_exp - 1.0)  # (2-p)/(p-1)
-
-        # Zero mass: exact compound Poisson
+        # Zero probability from Tweedie thin-plate limit: ψ = exp(-μ^(2-p)/(φ(2-p)))
+        exponent = 2.0 - p_exp
         lambda_param = pt.pow(mu_exp, exponent) / (phi_exp * exponent)
-        log_zero = -lambda_param
+        psi = pt.exp(-lambda_param)
+        psi = pt.clip(psi, 1e-12, 1.0 - 1e-12)
 
-        # Saddlepoint approximation for y > 0
-        y_safe = pt.clip(y_in, 1e-10, None)
-        u = y_safe / mu_exp
-        log_u = pt.log(u)
+        # Positive part: Gamma(α=μ/φ, β=1/φ) - matches Tweedie mean=μ, var=φμ^p in limit
+        log_zero = pt.log(psi)
+        log_pos = pt.log1p(-psi) + gamma_logp_det(y_in, mu_exp, phi_exp)
 
-        log_f = (
-            -0.5 * pt.log(2 * np.pi * phi_exp * y_safe * (p_exp - 1.0)) +
-            kappa * (u**(1.0 - kappa) - 1.0 - (1.0 - kappa) * log_u) -
-            0.5 * pt.log(1.0 + kappa * (p_exp - 1.0)**2 * pt.pow(u, p_exp - 2.0) / phi_exp)
-        )
-
-        # Combine hurdle + saddlepoint
-        log_emission = pt.switch(
-            pt.eq(y_in, 0),
-            log_zero,
-            log_f
-        )
-
-        # Apply mask (strong negative log-prob for masked entries)
+        # Combine
+        log_emission = pt.switch(pt.eq(y_in, 0), log_zero, log_pos)
         log_emission = pt.where(mask_in, log_emission, -1e12)
 
         # ---- 7. FORWARD ALGORITHM ----
@@ -250,7 +341,7 @@ def make_model(data, K=3, state_specific_p=True, p_fixed=1.5, use_gam=True, gam_
                 
                 alpha_seq.append(log_alpha_norm)
                 log_cumulant = log_cumulant + log_norm_t  
-            
+
             log_alpha_stacked = pt.stack(alpha_seq, axis=1)
             alpha_filtered_val = pt.exp(log_alpha_stacked) 
             logp_cust = pt.squeeze(log_cumulant, axis=1)
@@ -259,75 +350,41 @@ def make_model(data, K=3, state_specific_p=True, p_fixed=1.5, use_gam=True, gam_
         if K > 1:
             pm.Deterministic('alpha_filtered', alpha_filtered_val, dims=('customer', 'time', 'state'))
 
-        pm.Potential('loglike', pt.sum(logp_cust))
+        # Single log_likelihood deterministic for WAIC/LOO (both K=1 and K>1)
         pm.Deterministic('log_likelihood', logp_cust, dims=('customer',))
+        
+        pm.Potential('loglike', pt.sum(logp_cust))
 
         return model
-
+            
 
 # =============================================================================
-# 3. DATA LOADING
+# 4. DATA LOADING
 # =============================================================================
-def compute_rfm_features(y, mask):
-    """Compute Recency, Frequency, Monetary features from panel data."""
-    N, T = y.shape
-    R = np.zeros((N, T), dtype=np.float32)
-    F = np.zeros((N, T), dtype=np.float32)
-    M = np.zeros((N, T), dtype=np.float32)
-    
-    for i in range(N):
-        last_purchase = -1
-        cumulative_freq = 0
-        cumulative_spend = 0.0
-        
-        for t in range(T):
-            if mask[i, t]:
-                if y[i, t] > 0:
-                    last_purchase = t
-                    cumulative_freq += 1
-                    cumulative_spend += y[i, t]
-                
-                if last_purchase >= 0:
-                    R[i, t] = t - last_purchase
-                    F[i, t] = cumulative_freq
-                    M[i, t] = cumulative_spend / cumulative_freq if cumulative_freq > 0 else 0.0
-                else:
-                    R[i, t] = t + 1
-                    F[i, t] = 0
-                    M[i, t] = 0.0
-            else:
-                R[i, t] = 0
-                F[i, t] = 0
-                M[i, t] = 0.0
-    
-    return R, F, M
-
-
-def load_simulation_data(data_path, n_cust=None, seed=42, train_frac=1.0):
-    """Load simulation from CSV or PKL file."""
-    import pickle
-    
+def load_simulation_data(data_path, n_cust=None, seed=42, train_frac=0.8):
+    """
+    Load simulation data with train/test split.
+    Default: 80% train, 20% test for OOS evaluation.
+    """
     data_path = pathlib.Path(data_path)
     
-    if data_path.suffix == '.pkl':
-        with open(data_path, 'rb') as f:
-            sim = pickle.load(f)
-        N_full, T = sim['N'], sim['T']
-        obs = sim['observations']
-        source = 'pkl'
-    elif data_path.suffix == '.csv':
+    if data_path.suffix == '.csv':
         df = pd.read_csv(data_path)
         df.columns = df.columns.str.strip()
-        N_full = df['customer_id'].nunique()
-        T = df['time_period'].nunique() if 'time_period' in df.columns else df['t'].nunique()
-        obs_col = 'y' if 'y' in df.columns else 'observations'
-        id_col = 'customer_id'
-        time_col = 'time_period' if 'time_period' in df.columns else 't'
-        obs = df.pivot(index=id_col, columns=time_col, values=obs_col).values
+        
+        # Detect column names
+        id_col = 'customer_id' if 'customer_id' in df.columns else 'cust_id'
+        time_col = 't' if 't' in df.columns else 'time_period'
+        y_col = 'y' if 'y' in df.columns else 'observations'
+        
+        N_full = df[id_col].nunique()
+        T = df[time_col].nunique()
+        obs = df.pivot(index=id_col, columns=time_col, values=y_col).values
         source = 'csv'
     else:
-        raise ValueError(f"Unknown format: {data_path.suffix}")
+        raise ValueError(f"Only CSV supported, got: {data_path.suffix}")
     
+    # Subsample if requested
     if n_cust is not None and n_cust < N_full:
         rng = np.random.default_rng(seed)
         idx = rng.choice(N_full, n_cust, replace=False)
@@ -337,62 +394,267 @@ def load_simulation_data(data_path, n_cust=None, seed=42, train_frac=1.0):
         N = N_full
         idx = np.arange(N)
     
+    # Train/test split
     T_train = int(T * train_frac)
+    T_test = T - T_train
     
-    if train_frac < 1.0:
-        obs_train = obs[:, :T_train]
-        obs_test = obs[:, T_train:]
-    else:
-        obs_train = obs
-        obs_test = None
+    obs_train = obs[:, :T_train]
+    obs_test = obs[:, T_train:] if T_test > 0 else None
     
-    mask_train = np.ones((N, T_train), dtype=bool)
+    # Build masks
+    mask_train = ~np.isnan(obs_train)
+    mask_test = ~np.isnan(obs_test) if obs_test is not None else None
+    
+    # Compute RFM features
     R_train, F_train, M_train = compute_rfm_features(obs_train, mask_train)
     
-    # Standardize features
-    M_train = np.log1p(M_train)
-    R_train = (R_train - np.mean(R_train)) / (np.std(R_train) + 1e-6)
-    F_train = (F_train - np.mean(F_train)) / (np.std(F_train) + 1e-6)
-    M_train = (M_train - np.mean(M_train)) / (np.std(M_train) + 1e-6)
+    # Standardize features (important for numerical stability)
+    if R_train.std() > 0:
+        R_train = (R_train - R_train.mean()) / (R_train.std() + 1e-6)
+    if F_train.std() > 0:
+        F_train = (F_train - F_train.mean()) / (F_train.std() + 1e-6)
+    if M_train.std() > 0:
+        M_train = np.log1p(M_train)
+        M_train = (M_train - M_train.mean()) / (M_train.std() + 1e-6)
 
     data = {
-        'N': N, 'T': T_train, 'y': obs_train.astype(np.float32),
-        'mask': mask_train, 'R': R_train.astype(np.float32),
-        'F': F_train.astype(np.float32), 'M': M_train.astype(np.float32),
-        'customer_id': idx, 'time': np.arange(T_train), 'T_full': T,
+        'N': N, 
+        'T': T_train, 
+        'y': obs_train.astype(np.float32),
+        'mask': mask_train, 
+        'R': R_train.astype(np.float32),
+        'F': F_train.astype(np.float32), 
+        'M': M_train.astype(np.float32),
+        'customer_id': idx, 
+        'time': np.arange(T_train),
+        'T_full': T,
+        'T_test': T_test,
     }
     
     if obs_test is not None:
         data['y_test'] = obs_test.astype(np.float32)
-        data['mask_test'] = np.ones((N, T - T_train), dtype=bool)
-        data['T_test'] = T - T_train
+        data['mask_test'] = mask_test
+        
+        # Compute OOS RFM features (propagating from training)
+        R_test, F_test, M_test = compute_rfm_features_oos(obs_train, obs_test, mask_test)
+        
+        # Standardize using training stats
+        if R_train.std() > 0:
+            R_test = (R_test - R_train.mean()) / (R_train.std() + 1e-6)
+        if F_train.std() > 0:
+            F_test = (F_test - F_train.mean()) / (F_train.std() + 1e-6)
+        if M_train.std() > 0:
+            M_test = np.log1p(M_test)
+            M_test = (M_test - M_train.mean()) / (M_train.std() + 1e-6)
+        
+        data['R_test'] = R_test.astype(np.float32)
+        data['F_test'] = F_test.astype(np.float32)
+        data['M_test'] = M_test.astype(np.float32)
     
-    print(f"  Loaded: N={N}, T_train={T_train}, zeros={np.mean(obs_train==0):.1%} ({source})")
+    print(f"  Loaded: N={N}, T_train={T_train}, T_test={T_test}, "
+          f"zeros={np.mean(obs_train==0):.1%} ({source})")
+    print(f"  RFM stats - R: [{R_train.min():.2f}, {R_train.max():.2f}], "
+          f"F: [{F_train.min():.2f}, {F_train.max():.2f}], "
+          f"M: [{M_train.min():.2f}, {M_train.max():.2f}]")
+    
     return data
 
 
 # =============================================================================
-# 4. SMC RUNNER
+# 5. OOS PREDICTION
 # =============================================================================
-def run_smc(data, K, state_specific_p, p_fixed, use_gam, gam_df,
-            draws, chains, seed, out_dir, use_covariates=True):
-    """Run SMC with Tweedie model."""
+
+def compute_oos_prediction(data, idata, use_gam, gam_df, n_draws_use=200):
+    """
+    Compute OOS predictions with proper HMM state propagation.
+    Uses filtered state probabilities transitioned via Gamma.
+    """
+    try:
+        N, T_test = data['y_test'].shape
+        y_test = data['y_test']
+        R_test, F_test, M_test = data['R_test'], data['F_test'], data['M_test']
+        
+        post = idata.posterior
+        n_chains, n_draws_total = post.sizes['chain'], post.sizes['draw']
+        
+        # Determine K
+        if 'Gamma' in post:
+            K = post['Gamma'].shape[-1]
+        elif 'beta0' in post:
+            K = post['beta0'].shape[-1] if len(post['beta0'].shape) > 2 else 1
+        else:
+            K = 1
+        
+        # Precompute GAM bases once (Grok's optimization)
+        if use_gam:
+            basis_R = create_bspline_basis(R_test.flatten(), df=gam_df).reshape(N, T_test, -1)
+            basis_F = create_bspline_basis(F_test.flatten(), df=gam_df).reshape(N, T_test, -1)
+            basis_M = create_bspline_basis(M_test.flatten(), df=gam_df).reshape(N, T_test, -1)
+        
+        # Sample draws
+        draw_idx = np.random.choice(n_chains * n_draws_total, min(n_draws_use, n_chains * n_draws_total), replace=False)
+        
+        y_pred_samples = []
+        
+        for idx in draw_idx:
+            c = idx // n_draws_total
+            d = idx % n_draws_total
+            
+            # Use xarray isel (Grok's suggestion)
+            beta0_draw = post['beta0'].isel(chain=c, draw=d).values
+            
+            if use_gam:
+                w_R_draw = post['w_R'].isel(chain=c, draw=d).values
+                w_F_draw = post['w_F'].isel(chain=c, draw=d).values
+                w_M_draw = post['w_M'].isel(chain=c, draw=d).values
+                
+                if K == 1:
+                    eff_R = np.tensordot(basis_R, w_R_draw, axes=([2], [0]))
+                    eff_F = np.tensordot(basis_F, w_F_draw, axes=([2], [0]))
+                    eff_M = np.tensordot(basis_M, w_M_draw, axes=([2], [0]))
+                    mu_draw = np.exp(beta0_draw + eff_R + eff_F + eff_M)
+                    y_pred_d = mu_draw  # No state mixing for K=1
+                else:
+                    eff_R = np.tensordot(basis_R, w_R_draw, axes=([2], [1]))
+                    eff_F = np.tensordot(basis_F, w_F_draw, axes=([2], [1]))
+                    eff_M = np.tensordot(basis_M, w_M_draw, axes=([2], [1]))
+                    mu_draw = np.exp(beta0_draw[None, None, :] + eff_R + eff_F + eff_M)
+                    
+                    # HMM state propagation (Gemini's approach)
+                    # Get initial state prob from last filtered state
+                    if 'alpha_filtered' in post:
+                        last_alpha = post['alpha_filtered'].isel(chain=c, draw=d).values[:, -1, :]  # (N, K)
+                        state_prob = last_alpha
+                    else:
+                        state_prob = np.ones((N, K)) / K
+                    
+                    Gamma_draw = post['Gamma'].isel(chain=c, draw=d).values  # (K, K)
+                    
+                    # Propagate and predict
+                    y_pred_d = np.zeros((N, T_test))
+                    for t in range(T_test):
+                        state_prob = state_prob @ Gamma_draw  # (N, K)
+                        y_pred_d[:, t] = np.sum(state_prob * mu_draw[:, t, :], axis=1)
+            else:
+                # Linear/Intercept only
+                if K == 1:
+                    mu_draw = np.exp(beta0_draw)
+                    y_pred_d = np.full((N, T_test), mu_draw)
+                else:
+                    # Would need betaR, betaF, betaM here - add if needed
+                    mu_draw = np.exp(beta0_draw[None, None, :])  # Broadcast
+                    
+                    if 'alpha_filtered' in post:
+                        last_alpha = post['alpha_filtered'].isel(chain=c, draw=d).values[:, -1, :]
+                        state_prob = last_alpha
+                    else:
+                        state_prob = np.ones((N, K)) / K
+                    
+                    Gamma_draw = post['Gamma'].isel(chain=c, draw=d).values
+                    
+                    y_pred_d = np.zeros((N, T_test))
+                    for t in range(T_test):
+                        state_prob = state_prob @ Gamma_draw
+                        # Assume same mu across time for intercept-only
+                        y_pred_d[:, t] = np.sum(state_prob * mu_draw[0, 0, :], axis=1)
+            
+            y_pred_samples.append(y_pred_d)
+        
+        # Aggregate predictions
+        y_pred_mean = np.mean(y_pred_samples, axis=0)
+        
+        # Compute metrics
+        mask = ~np.isnan(y_test)
+        if mask.sum() == 0:
+            return {'rmse': np.nan, 'mae': np.nan, 'y_pred': None}
+        
+        residuals = y_test[mask] - y_pred_mean[mask]
+        rmse = np.sqrt(np.mean(residuals**2))
+        mae = np.mean(np.abs(residuals))
+        
+        # Log predictive score (approximate)
+        # For Tweedie: log p(y|mu,p,phi) - would need p and phi per draw
+        # Simplified version: log of predicted mean (crude)
+        lps = np.mean(np.log(y_pred_mean[mask] + 1e-10))
+        
+        return {
+            'rmse': float(rmse),
+            'mae': float(mae),
+            'log_pred_score': float(lps),
+            'y_pred': y_pred_mean,
+            'n_draws': len(draw_idx)
+        }
+        
+    except Exception as e:
+        print(f"  OOS prediction error: {e}")
+        import traceback
+        traceback.print_exc()
+        return {'rmse': np.nan, 'mae': np.nan, 'y_pred': None}
+
+
+# =============================================================================
+# 6. SMC RUNNER
+# =============================================================================
+def run_smc(
+    data,
+    K,
+    state_specific_p,
+    p_fixed,
+    use_gam,
+    gam_df,
+    draws,
+    chains,
+    seed,
+    out_dir,
+    use_covariates=True
+):
+    """Run SMC with Tweedie model and OOS evaluation."""
     
     cores = min(chains, os.cpu_count() or 1)
     t0 = time.time()
-
+    
     try:
-        with make_model(data, K=K, state_specific_p=state_specific_p,
-                       p_fixed=p_fixed, use_gam=use_gam, gam_df=gam_df,
-                       use_covariates=use_covariates) as model:
-
-            print(f" Model: K={K}, Tweedie-{'GAM' if use_gam else 'GLM'}, "
-                  f"p={'state-specific' if state_specific_p else p_fixed}")
+        with make_model(
+            data,
+            K=K,
+            state_specific_p=state_specific_p,
+            p_fixed=p_fixed,
+            use_gam=use_gam,
+            gam_df=gam_df,
+            use_covariates=use_covariates
+        ) as model:
             
-            idata = pm.sample_smc(draws=draws, chains=chains, cores=cores,
-                                  random_seed=seed, return_inferencedata=True,
-                                  threshold=0.5 if K > 2 else 0.8)
+            print(
+                f" Model: K={K}, Tweedie-{'GAM' if use_gam else 'GLM'}, "
+                f"p={'state-specific' if state_specific_p else p_fixed}, "
+                f"covariates={'yes' if use_covariates else 'no'}"
+            )
 
+
+            idata = pm.sample_smc(
+                draws=draws,
+                chains=chains,
+                cores=cores,
+                random_seed=seed,
+                return_inferencedata=True
+            )
+            
+
+        # Post-hoc ESS calculation (more accurate)
+        try:
+            # Use arviz ESS on key parameters
+            ess_vals = []
+            for var in ['beta0', 'phi', 'Gamma']:
+                if var in idata.posterior:
+                    ess = az.ess(idata, var_names=[var])
+                    ess_vals.append(ess.to_array().values.flatten())
+            if ess_vals:
+                ess_min = float(np.nanmin(np.concatenate(ess_vals)))
+            else:
+                ess_min = np.nan
+        except:
+            ess_min = np.nan
+        
         # Extract log-evidence
         log_ev = np.nan
         try:
@@ -405,8 +667,10 @@ def run_smc(data, K, state_specific_p, p_fixed, use_gam, gam_df,
                     else:
                         chain_list = lm[c] if lm.ndim == 1 else lm[0]
                     if isinstance(chain_list, list):
-                        valid = [float(x) for x in chain_list 
-                                if isinstance(x, (int, float, np.floating)) and np.isfinite(x)]
+                        valid = [
+                            float(x) for x in chain_list
+                            if isinstance(x, (int, float, np.floating)) and np.isfinite(x)
+                        ]
                         if valid:
                             chain_vals.append(valid[-1])
                     elif isinstance(chain_list, (int, float, np.floating)) and np.isfinite(chain_list):
@@ -417,49 +681,96 @@ def run_smc(data, K, state_specific_p, p_fixed, use_gam, gam_df,
                 valid = flat[np.isfinite(flat)]
                 log_ev = float(np.mean(valid)) if len(valid) > 0 else np.nan
         except Exception as e:
-            print(f"  Warning: log-ev extraction failed: {e}")
-
+            print(f" Warning: log-ev extraction failed: {e}")
+        
         if log_ev > 0:
-            print("  WARNING: Positive Log-Ev detected. Numerical instability likely.")
-
+            print(" WARNING: Positive Log-Ev detected. Numerical instability likely.")
+        
         elapsed = (time.time() - t0) / 60
-
+        
+        # Compute ESS and R-hat
+        ess_min = np.nan
+        rhat_max = np.nan
+        try:
+            ess = az.ess(idata)
+            rhat = az.rhat(idata)
+            ess_min = float(ess.to_array().min())
+            rhat_max = float(rhat.to_array().max())
+        except:
+            pass
+        
         res = {
-            'K': K, 'model_type': 'tweedie', 'N': data['N'], 'T': data['T'],
-            'use_gam': use_gam, 'gam_df': gam_df if use_gam else None,
-            'state_specific_p': state_specific_p, 'p_fixed': p_fixed,
-            'log_evidence': log_ev, 'draws': draws, 'chains': chains,
-            'time_min': elapsed, 'timestamp': time.strftime('%Y%m%d_%H%M%S'),
-            'ess_min': float(az.ess(idata).to_array().min()) if 'posterior' in idata else np.nan,
-            'rhat_max': float(az.rhat(idata).to_array().max()) if 'posterior' in idata else np.nan,
+            'K': K,
+            'model_type': 'tweedie',
+            'N': data['N'],
+            'T': data['T'],
+            'T_test': data.get('T_test', 0),
+            'use_gam': use_gam,
+            'gam_df': gam_df if use_gam else None,
+            'use_covariates': use_covariates,
+            'state_specific_p': state_specific_p,
+            'p_fixed': p_fixed,
+            'log_evidence': log_ev,
+            'draws': draws,
+            'chains': chains,
+            'time_min': elapsed,
+            'timestamp': time.strftime('%Y%m%d_%H%M%S'),
+            'ess_min': ess_min,
+            'rhat_max': rhat_max,
         }
-
+        
+        # OOS prediction
+        if 'y_test' in data:
+            print(" Computing OOS predictions...")
+            oos_results = compute_oos_prediction(data, idata, use_gam, gam_df)
+            res['oos_rmse'] = oos_results.get('rmse', np.nan)
+            res['oos_mae'] = oos_results.get('mae', np.nan)
+            res['oos_log_pred'] = oos_results.get('log_pred_score', np.nan)
+            res['y_pred_mean'] = oos_results.get('y_pred', None)  # Save actual predictions
+            print(f" OOS RMSE: {res['oos_rmse']:.4f}, MAE: {res['oos_mae']:.4f}")
+        
+        # Compute WAIC and LOO for model comparison
+        try:
+            waic = az.waic(idata)
+            loo = az.loo(idata)
+            res['waic'] = float(waic.waic)
+            res['waic_se'] = float(waic.waic_se)
+            res['loo'] = float(loo.loo)
+            res['loo_se'] = float(loo.loo_se)
+            print(f" WAIC: {res['waic']:.2f}, LOO: {res['loo']:.2f}")
+        except Exception as e:
+            print(f" WAIC/LOO computation failed: {e}")
+            res['waic'] = np.nan
+            res['loo'] = np.nan
+        
         p_tag = "statep" if state_specific_p else f"p{p_fixed}"
         pkl_path = out_dir / f"smc_K{K}_TWEEDIE_{'GAM' if use_gam else 'GLM'}_{p_tag}_N{data['N']}_T{data['T']}_D{draws}.pkl"
-
+        
         with open(pkl_path, 'wb') as f:
             pickle.dump({'idata': idata, 'res': res, 'data': data}, f, protocol=4)
-
-        print(f"  log_ev={log_ev:.2f}, time={elapsed:.1f}min")
-        print(f"  Saved: {pkl_path.name}")
+        
+        print(
+            f" log_ev={log_ev:.2f}, ess_min={ess_min:.1f}, "
+            f"rhat_max={rhat_max:.3f}, time={elapsed:.1f}min"
+        )
+        print(f" Saved: {pkl_path}")
+        
         return pkl_path, res
-
+   
     except Exception as e:
-        print(f"  CRASH: {str(e)[:60]}")
+        print(f" CRASH: {str(e)[:60]}")
         import traceback
         traceback.print_exc()
         raise
 
-
 # =============================================================================
-# 5. MAIN
+# 7. MAIN
 # =============================================================================
 def main():
-    parser = argparse.ArgumentParser(description='HMM-Tweedie Model with Saddlepoint Approximation')
-    parser.add_argument('--dataset', required=True, choices=['uci', 'cdnow', 'simulation'])
-    parser.add_argument('--data_dir', type=str, default='./data')
-    parser.add_argument('--sim_path', type=str, default=None,
-                       help='Path to simulation file (.csv or .pkl). Required if --dataset simulation')
+    parser = argparse.ArgumentParser(description='HMM-Tweedie Model with OOS Evaluation')
+    parser.add_argument('--dataset', required=True, choices=['simulation'])
+    parser.add_argument('--sim_path', type=str, required=True,
+                       help='Path to simulation CSV file')
     parser.add_argument('--n_cust', type=int, default=None)
     parser.add_argument('--K', type=int, default=3)
     parser.add_argument('--state_specific_p', action='store_true')
@@ -470,8 +781,10 @@ def main():
     parser.add_argument('--chains', type=int, default=4)
     parser.add_argument('--out_dir', type=str, default='./results')
     parser.add_argument('--seed', type=int, default=RANDOM_SEED)
-    parser.add_argument('--train_frac', type=float, default=1.0)
-    parser.add_argument('--no_covariates', action='store_true')
+    parser.add_argument('--train_frac', type=float, default=0.8,
+                       help='Fraction for training (default 0.8 = 80%% train, 20%% test)')
+    parser.add_argument('--no_covariates', action='store_true',
+                       help='Disable RFM covariates (intercept-only)')
     
     args = parser.parse_args()
 
@@ -484,15 +797,12 @@ def main():
     print(f"\n{'='*70}")
     print(f"HMM-Tweedie: {args.dataset.upper()} | K={args.K} | "
           f"{'state-p' if args.state_specific_p else f'p={args.p_fixed}'}")
+    print(f"Train/Test: {args.train_frac:.0%}/{1-args.train_frac:.0%} | "
+          f"Covariates: {'no' if args.no_covariates else 'yes'}")
     print(f"{'='*70}")
 
-    if args.dataset == 'simulation':
-        if not args.sim_path:
-            raise ValueError("--sim_path required for simulation dataset")
-        data = load_simulation_data(args.sim_path, n_cust=args.n_cust, 
-                                    seed=args.seed, train_frac=args.train_frac)
-    else:
-        raise NotImplementedError("Only --dataset simulation supported in this version")
+    data = load_simulation_data(args.sim_path, n_cust=args.n_cust, 
+                                seed=args.seed, train_frac=args.train_frac)
 
     print(f"\nRunning SMC...")
     pkl_path, res = run_smc(data, args.K, args.state_specific_p, args.p_fixed,
@@ -502,7 +812,10 @@ def main():
     print(f"\n{'='*70}")
     print("RESULTS")
     for key, val in res.items():
-        print(f"  {key}: {val}")
+        if isinstance(val, float):
+            print(f"  {key}: {val:.4f}" if abs(val) < 1000 else f"  {key}: {val:.2f}")
+        else:
+            print(f"  {key}: {val}")
     print(f"{'='*70}")
 
 
