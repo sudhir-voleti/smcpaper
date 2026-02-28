@@ -23,6 +23,7 @@ import pymc as pm
 import arviz as az
 from patsy import dmatrix
 from sklearn.metrics import adjusted_rand_score, confusion_matrix
+from sklearn.metrics import mean_squared_error, mean_absolute_error
 
 warnings.filterwarnings('ignore')
 RANDOM_SEED = 42
@@ -63,22 +64,39 @@ def compute_rfm_features(y, mask):
     return R, F, M
 
 
-def load_simulation_data_from_csv(csv_path, T=104, N=None, seed=RANDOM_SEED):
-    """Load simulation data from CSV."""
+def load_simulation_data_from_csv(csv_path, T=104, N=None, train_ratio=1.0, seed=RANDOM_SEED):
+    """
+    Load simulation data from CSV with optional train/test split.
+    
+    Parameters:
+    -----------
+    csv_path : Path - Direct path to CSV file
+    T : int - Target time periods (will pad/truncate to this)
+    N : int - Number of customers to subsample (None = use all)
+    train_ratio : float - Ratio of time periods for training (1.0 = use all, 0.8 = 80/20 split)
+    seed : int - Random seed for reproducible subsampling
+    
+    Returns:
+    --------
+    data : dict with keys 'N', 'T', 'y', 'mask', 'R', 'F', 'M', 'true_states', 
+           'y_test', 'mask_test', 'R_test', 'F_test', 'M_test' (if train_ratio < 1)
+    """
     csv_path = Path(csv_path)
     
     if not csv_path.exists():
-        raise FileNotFoundError(f"CSV not found: {csv_path}")
+        raise FileNotFoundError(f"CSV file not found: {csv_path}")
     
     print(f"  Reading CSV: {csv_path.name}")
     df = pd.read_csv(csv_path)
     
+    # Detect world name from filename
     world = "unknown"
     for w in ['Harbor', 'Breeze', 'Fog', 'Cliff']:
         if w.lower() in csv_path.name.lower():
             world = w
             break
     
+    # Flexible column name mapping
     col_mapping = {
         'customer_id': ['customer_id', 'cust_id', 'id', 'customer', 'cust'],
         't': ['t', 'time', 'period', 'time_period', 'week', 'Time'],
@@ -97,14 +115,17 @@ def load_simulation_data_from_csv(csv_path, T=104, N=None, seed=RANDOM_SEED):
         missing = set(col_mapping.keys()) - set(actual_cols.keys())
         raise ValueError(f"CSV missing columns. Found: {list(df.columns)}, need: {missing}")
     
+    # Rename to standard
     df = df.rename(columns={v: k for k, v in actual_cols.items()})
     
+    # Reshape to panel
     N_actual = df['customer_id'].nunique()
     T_actual = df['t'].nunique()
     
     y_full = df.pivot(index='customer_id', columns='t', values='y').values
     true_states_full = df.pivot(index='customer_id', columns='t', values='true_state').values
     
+    # Pad or truncate to target T
     if T_actual < T:
         pad_width = ((0, 0), (0, T - T_actual))
         y_full = np.pad(y_full, pad_width, mode='constant', constant_values=0)
@@ -117,6 +138,7 @@ def load_simulation_data_from_csv(csv_path, T=104, N=None, seed=RANDOM_SEED):
     else:
         T_effective = T_actual
     
+    # Subsample customers if requested
     if N is not None and N < N_actual:
         rng = np.random.default_rng(seed)
         idx = rng.choice(N_actual, N, replace=False)
@@ -127,13 +149,34 @@ def load_simulation_data_from_csv(csv_path, T=104, N=None, seed=RANDOM_SEED):
     else:
         N_effective = N_actual
     
-    mask = (true_states_full >= 0) & (~np.isnan(y_full))
-    y_full = np.where(mask, y_full, 0.0)
+    # TRAIN/TEST SPLIT
+    if train_ratio < 1.0:
+        T_train = int(T_effective * train_ratio)
+        T_test = T_effective - T_train
+        
+        y_train = y_full[:, :T_train]
+        y_test = y_full[:, T_train:]
+        true_train = true_states_full[:, :T_train]
+        true_test = true_states_full[:, T_train:]
+        
+        print(f"  Split: T_train={T_train}, T_test={T_test} ({train_ratio:.0%}/{1-train_ratio:.0%})")
+    else:
+        y_train = y_full
+        y_test = None
+        true_train = true_states_full
+        true_test = None
+        T_train = T_effective
     
-    R, F, M = compute_rfm_features(y_full, mask)
+    # Create mask for training data
+    mask_train = (true_train >= 0) & (~np.isnan(y_train))
+    y_train = np.where(mask_train, y_train, 0.0)
     
+    # Compute RFM for training
+    R, F, M = compute_rfm_features(y_train, mask_train)
+    
+    # Standardize RFM
     M_log = np.log1p(M)
-    R_valid, F_valid, M_valid = R[mask], F[mask], M_log[mask]
+    R_valid, F_valid, M_valid = R[mask_train], F[mask_train], M_log[mask_train]
     
     if len(R_valid) > 0 and R_valid.std() > 0:
         R = (R - R_valid.mean()) / (R_valid.std() + 1e-6)
@@ -146,23 +189,55 @@ def load_simulation_data_from_csv(csv_path, T=104, N=None, seed=RANDOM_SEED):
     
     data = {
         'N': N_effective,
-        'T': T_effective,
-        'y': y_full.astype(np.float32),
-        'mask': mask.astype(bool),
+        'T': T_train,  # Training periods
+        'y': y_train.astype(np.float32),
+        'mask': mask_train.astype(bool),
         'R': R.astype(np.float32),
         'F': F.astype(np.float32),
         'M': M_scaled.astype(np.float32),
-        'true_states': true_states_full.astype(np.int32),
+        'true_states': true_train.astype(np.int32),
         'world': world,
         'M_raw': M.astype(np.float32),
-        'source_file': str(csv_path.name)
+        'source_file': str(csv_path.name),
+        'T_total': T_effective,
+        'train_ratio': train_ratio
     }
     
-    y_valid = y_full[mask]
+    # Add test data if split
+    if y_test is not None:
+        mask_test = (true_test >= 0) & (~np.isnan(y_test))
+        y_test = np.where(mask_test, y_test, 0.0)
+        
+        # Compute RFM for test (using training stats for standardization)
+        R_test, F_test, M_test = compute_rfm_features(y_test, mask_test)
+        M_test_log = np.log1p(M_test)
+        
+        # Standardize using training stats
+        if len(R_valid) > 0 and R_valid.std() > 0:
+            R_test = (R_test - R_valid.mean()) / (R_valid.std() + 1e-6)
+        if len(F_valid) > 0 and F_valid.std() > 0:
+            F_test = (F_test - F_valid.mean()) / (F_valid.std() + 1e-6)
+        if len(M_valid) > 0 and M_valid.std() > 0:
+            M_test_scaled = (M_test_log - M_valid.mean()) / (M_valid.std() + 1e-6)
+        else:
+            M_test_scaled = M_test_log
+        
+        data.update({
+            'y_test': y_test.astype(np.float32),
+            'mask_test': mask_test.astype(bool),
+            'R_test': R_test.astype(np.float32),
+            'F_test': F_test.astype(np.float32),
+            'M_test': M_test_scaled.astype(np.float32),
+            'true_states_test': true_test.astype(np.int32),
+            'T_test': T_test
+        })
+    
+    # Summary stats
+    y_valid = y_train[mask_train]
     zero_rate = np.mean(y_valid == 0) if len(y_valid) > 0 else 0.0
     mean_spend = np.mean(y_valid[y_valid > 0]) if (y_valid > 0).any() else 0.0
     
-    print(f"  Data: N={N_effective}, T={T_effective}, zeros={zero_rate:.1%}, mean=${mean_spend:.2f}")
+    print(f"  Data: N={N_effective}, T_train={T_train}, zeros={zero_rate:.1%}, mean=${mean_spend:.2f}")
     
     return data
 
@@ -205,6 +280,135 @@ def forward_algorithm_scan(log_emission, log_Gamma, pi0):
     
     return log_marginal, log_alpha_norm_full
 
+## ---
+
+def compute_bemmaor_oos(data, idata, n_draws_use=200):
+    """
+    Compute OOS predictions for Bemmaor model.
+    
+    Uses posterior predictive with forward propagation of HMM states.
+    """
+    try:
+        if 'y_test' not in data:
+            print("  No test data found")
+            return {'rmse': np.nan, 'mae': np.nan, 'y_pred': None}
+        
+        N, T_test = data['y_test'].shape
+        y_test = data['y_test']
+        R_test, F_test, M_test = data['R_test'], data['F_test'], data['M_test']
+        mask_test = data['mask_test']
+        
+        post = idata.posterior
+        n_chains, n_draws_total = post.sizes['chain'], post.sizes['draw']
+        K = post['Gamma'].shape[-1] if 'Gamma' in post else 1
+        
+        # Random draw selection
+        rng = np.random.default_rng(42)
+        draw_idx = rng.choice(n_chains * n_draws_total, min(n_draws_use, n_chains * n_draws_total), replace=False)
+        
+        y_pred_samples = []
+        
+        for idx in draw_idx:
+            c = idx // n_draws_total
+            d = idx % n_draws_total
+            
+            # Extract parameters
+            if K == 1:
+                # Single state - simpler case
+                r_nbd = np.exp(post['log_r'].isel(chain=c, draw=d).values)
+                alpha_h = post['alpha_h'].isel(chain=c, draw=d).values
+                gamma_h = post['gamma_h'].isel(chain=c, draw=d).values
+                theta = post['theta'].isel(chain=c, draw=d).values  # (N, 1)
+                
+                # Lambda (frequency)
+                log_lam = alpha_h + gamma_h * theta
+                lam = np.exp(np.clip(log_lam, -10, 10))
+                
+                # NBD P(y=0)
+                p_zero = (r_nbd / (r_nbd + lam.squeeze())) ** r_nbd
+                
+                # Gamma params
+                beta_m = post['beta_m'].isel(chain=c, draw=d).values
+                gamma_m_val = post['gamma_m'].isel(chain=c, draw=d).values
+                log_alpha_gamma = post['log_alpha_gamma'].isel(chain=c, draw=d).values
+                alpha_gamma = np.exp(log_alpha_gamma)
+                
+                log_mu = beta_m + gamma_m_val * theta.squeeze()
+                mu = np.exp(np.clip(log_mu, -10, 10))
+                
+                # Predicted spend = P(y>0) * E[y|y>0]
+                # E[y|y>0] for Gamma = mu (since mean = alpha/beta = mu)
+                y_pred_d = (1 - p_zero) * mu
+                
+            else:
+                # Multi-state HMM
+                r_nbd = np.exp(post['log_r'].isel(chain=c, draw=d).values)  # (K,)
+                alpha_h = post['alpha_h'].isel(chain=c, draw=d).values  # (K,)
+                gamma_h = post['gamma_h'].isel(chain=c, draw=d).values
+                theta = post['theta'].isel(chain=c, draw=d).values  # (N, 1)
+                
+                # Lambda per state
+                log_lam = alpha_h[None, None, :] + gamma_h * theta[:, :, None]  # (N, 1, K)
+                lam = np.exp(np.clip(log_lam, -10, 10))
+                
+                # NBD P(y=0) per state
+                r_exp = r_nbd[None, None, :]
+                p_zero = (r_exp / (r_exp + lam)) ** r_exp  # (N, 1, K)
+                
+                # Gamma params per state
+                beta_m = post['beta_m'].isel(chain=c, draw=d).values  # (K,)
+                gamma_m_val = post['gamma_m'].isel(chain=c, draw=d).values
+                log_alpha_gamma = post['log_alpha_gamma'].isel(chain=c, draw=d).values
+                alpha_gamma = np.exp(log_alpha_gamma)
+                
+                log_mu = beta_m[None, None, :] + gamma_m_val * theta[:, :, None]
+                mu = np.exp(np.clip(log_mu, -10, 10))
+                
+                # Get final filtered state probabilities from training
+                if 'alpha_filtered' in post:
+                    # Use last time point from training
+                    state_prob = post['alpha_filtered'].isel(chain=c, draw=d).values[:, -1, :]  # (N, K)
+                else:
+                    state_prob = np.ones((N, K)) / K
+                
+                # Transition matrix
+                Gamma = post['Gamma'].isel(chain=c, draw=d).values  # (K, K)
+                
+                # Forward predict for test periods
+                y_pred_d = np.zeros((N, T_test))
+                
+                for t in range(T_test):
+                    # Propagate state distribution
+                    state_prob = state_prob @ Gamma
+                    
+                    # Expected spend = sum_k P(state=k) * P(y>0|k) * E[y|y>0,k]
+                    p_pos = 1 - p_zero[:, 0, :]  # (N, K)
+                    expected_spend = state_prob * p_pos * mu[:, 0, :]
+                    y_pred_d[:, t] = np.sum(expected_spend, axis=1)
+            
+            y_pred_samples.append(y_pred_d)
+        
+        # Average across posterior draws
+        y_pred_mean = np.mean(y_pred_samples, axis=0)
+        
+        # Compute metrics on masked test data
+        if mask_test.sum() == 0:
+            return {'rmse': np.nan, 'mae': np.nan, 'y_pred': y_pred_mean}
+        
+        y_true_masked = y_test[mask_test]
+        y_pred_masked = y_pred_mean[mask_test]
+        
+        residuals = y_true_masked - y_pred_masked
+        rmse = np.sqrt(np.mean(residuals**2))
+        mae = np.mean(np.abs(residuals))
+        
+        return {'rmse': float(rmse), 'mae': float(mae), 'y_pred': y_pred_mean}
+        
+    except Exception as e:
+        print(f"  OOS computation error: {e}")
+        import traceback
+        traceback.print_exc()
+        return {'rmse': np.nan, 'mae': np.nan, 'y_pred': None}
 
 # =============================================================================
 # BEMMAOR HMM MODEL
@@ -381,18 +585,53 @@ def run_smc_bemmaor(data, K, draws, chains, seed, out_dir):
             
             elapsed = (time.time() - t0) / 60
             
+            # OOS prediction
+            oos_rmse, oos_mae = np.nan, np.nan
+            if 'y_test' in data:
+                print("  Computing OOS predictions...")
+                oos_results = compute_bemmaor_oos(data, idata, n_draws_use=200)
+                oos_rmse = oos_results.get('rmse', np.nan)
+                oos_mae = oos_results.get('mae', np.nan)
+                print(f"  OOS RMSE: {oos_rmse:.4f}, MAE: {oos_mae:.4f}")
+
+
             log_ev = np.nan
             try:
                 lm = idata.sample_stats.log_marginal_likelihood.values
-                if hasattr(lm, 'flatten'):
-                    flat = lm.flatten()
+                # Handle object dtype (list of lists from variable chains)
+                if hasattr(lm, 'dtype') and lm.dtype == object:
+                    chain_finals = []
+                    for c in range(lm.shape[1] if lm.ndim > 1 else len(lm)):
+                        if lm.ndim > 1:
+                            chain_data = lm[-1, c] if lm.shape[0] > 0 else lm[0, c]
+                        else:
+                            chain_data = lm[c]
+                        
+                        # Extract last valid float from list
+                        if isinstance(chain_data, (list, np.ndarray)):
+                            valid = [float(x) for x in chain_data 
+                                    if isinstance(x, (int, float, np.floating)) and np.isfinite(x)]
+                            if valid:
+                                chain_finals.append(valid[-1])
+                        elif isinstance(chain_data, (int, float, np.floating)) and np.isfinite(chain_data):
+                            chain_finals.append(float(chain_data))
+                    
+                    log_ev = float(np.mean(chain_finals)) if chain_finals else np.nan
+                    print(f"  Extracted log_ev from {len(chain_finals)} chains: {chain_finals}")
+                else:
+                    # Numeric array
+                    flat = np.array(lm).flatten()
                     valid = flat[np.isfinite(flat)]
                     log_ev = float(np.mean(valid)) if len(valid) > 0 else np.nan
-            except:
-                pass
-            
+                    
+            except Exception as e:
+                print(f"  Warning: log-ev extraction failed: {e}")
+                log_ev = np.nan
+
+           
             print(f"  log_ev={log_ev:.2f}, time={elapsed:.1f}min")
-            
+  
+          
             diagnostics = {}
             try:
                 ess = az.ess(idata)
@@ -416,7 +655,11 @@ def run_smc_bemmaor(data, K, draws, chains, seed, out_dir):
                 'draws': draws,
                 'chains': chains,
                 'time_min': elapsed,
-                **diagnostics
+                'ess_min': diagnostics.get('ess_min', np.nan),
+                'rhat_max': diagnostics.get('rhat_max', np.nan),
+                'oos_rmse': oos_rmse,
+                'oos_mae': oos_mae,
+                'train_ratio': data.get('train_ratio', 1.0)
             }
             
             out_dir = Path(out_dir)
@@ -452,14 +695,16 @@ def main():
     parser.add_argument('--chains', type=int, default=4)
     parser.add_argument('--out_dir', type=str, default='./results')
     parser.add_argument('--seed', type=int, default=RANDOM_SEED)
-    
+    parser.add_argument('--train_ratio', type=float, default=1.0,
+                       help='Training data ratio (1.0=use all, 0.8=80/20 train/test)')    
     args = parser.parse_args()
     
     print("=" * 70)
     print("Bemmaor HMM: Correlated NBD-Gamma")
     print("=" * 70)
     
-    data = load_simulation_data_from_csv(Path(args.csv_path), args.T, args.N, seed=args.seed)
+    data = load_simulation_data_from_csv(Path(args.csv_path), args.T, args.N, 
+                                         train_ratio=args.train_ratio, seed=args.seed)
     
     print(f"\nConfiguration: K={args.K}, N={data['N']}, T={data['T']}")
     print("=" * 70)
@@ -486,3 +731,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
