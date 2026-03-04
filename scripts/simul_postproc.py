@@ -41,18 +41,17 @@ def extract_model_info(pkl_path: Path) -> Dict:
         'T': None,
         'D': None,
         'world': None,
-        'glm_gam': None
+        'glm_gam': 'GLM'  # Default
     }
     
     # Detect model type from filename patterns
-    if 'BEMMAOR' in name.upper():
+    name_upper = name.upper()
+    if 'BEMMAOR' in name_upper:
         info['model_type'] = 'BEMMAOR'
-    elif 'TWEEDIE' in name.upper():
+    elif 'TWEEDIE' in name_upper:
         info['model_type'] = 'TWEEDIE'
-    elif 'HURDLE' in name.upper():
-        info['model_type'] = 'HURDLE'
     else:
-        # Hurdle files don't have HURDLE in name - check by absence of others
+        # Hurdle files don't have HURDLE in name
         info['model_type'] = 'HURDLE'
     
     # Extract K, N, T, D from filename
@@ -68,6 +67,12 @@ def extract_model_info(pkl_path: Path) -> Dict:
         if match:
             info[key] = int(match.group(1))
     
+    # Detect GLM/GAM
+    if 'GAM' in name_upper:
+        info['glm_gam'] = 'GAM'
+    elif 'GLM' in name_upper:
+        info['glm_gam'] = 'GLM'
+    
     # Detect world from path
     world_candidates = ['harbor', 'breeze', 'fog', 'cliff']
     path_lower = str(pkl_path).lower()
@@ -75,12 +80,6 @@ def extract_model_info(pkl_path: Path) -> Dict:
         if world in path_lower:
             info['world'] = world.capitalize()
             break
-    
-    # Detect GLM/GAM
-    if 'GAM' in name.upper():
-        info['glm_gam'] = 'GAM'
-    elif 'GLM' in name.upper():
-        info['glm_gam'] = 'GLM'
     
     return info
 
@@ -197,25 +196,39 @@ def extract_predictive_metrics(res: Dict) -> Dict:
 
 def find_best_alignment(true_flat: np.ndarray, pred_flat: np.ndarray, K: int) -> Tuple[Dict, float, np.ndarray]:
     """Find optimal label permutation for state alignment."""
-    if K > 6:
+
+    if K is None or K > 6 or K < 2:
+        fallback_map = {i: i for i in range(K)} if K is not None else {}
+        return fallback_map, np.nan, pred_flat
+    
+    # Ensure arrays are 1D and same length
+    true_flat = np.asarray(true_flat).flatten()
+    pred_flat = np.asarray(pred_flat).flatten()
+    
+    if len(true_flat) != len(pred_flat):
         return {i: i for i in range(K)}, np.nan, pred_flat
     
     best_acc = -1
     best_map = {i: i for i in range(K)}
     best_aligned = pred_flat
     
-    for perm in permutations(range(K)):
-        remap = {i: perm[i] for i in range(K)}
-        aligned = np.vectorize(remap.get)(pred_flat)
-        acc = accuracy_score(true_flat, aligned)
-        
-        if acc > best_acc:
-            best_acc = acc
-            best_map = remap
-            best_aligned = aligned
+    try:
+        for perm in permutations(range(K)):
+            remap = {i: perm[i] for i in range(K)}
+            aligned = np.vectorize(remap.get)(pred_flat)
+            acc = accuracy_score(true_flat, aligned)
+            
+            if acc > best_acc:
+                best_acc = acc
+                best_map = remap
+                best_aligned = aligned
+    except Exception as e:
+        print(f"    Alignment error: {e}")
+        return {i: i for i in range(K)}, np.nan, pred_flat
     
     return best_map, best_acc, best_aligned
 
+## ----
 
 def extract_state_recovery(idata, data: Dict, world: str) -> Dict:
     """Extract ARI, accuracy, and confusion matrix against true states."""
@@ -225,67 +238,107 @@ def extract_state_recovery(idata, data: Dict, world: str) -> Dict:
         'true_states_found': False
     }
     
-    # Check for true states
+    print(f"    DEBUG: world={world}, N={data.get('N')}, T={data.get('T')}")
+    
+    # Check for true states in data
     true_states = data.get('true_states')
+    print(f"    DEBUG: true_states in data: {true_states is not None}")
+
+    # If not in data, try to load from .npy file
     if true_states is None:
-        # Try to load from file
-        world_dir = Path(data.get('source_file', '.')).parent
-        for pattern in [
-            f"true_states_{world}_N{data.get('N')}_T{data.get('T')}.npy",
-            f"true_states_{world}_N1000_T104.npy"
-        ]:
+        # Try multiple paths
+        npy_paths = [
+            Path(data.get('source_file', '.')).parent / f"true_states_{world}_N{data.get('N')}_T{data.get('T')}.npy",
+            Path(data.get('source_file', '.')).parent / f"true_states_{world}_N1000_T{data.get('T')}.npy",
+            Path(data.get('source_file', '.')).parent / f"true_states_{world}_N1000_T52.npy",
+            Path("/Users/sudhirvoleti/research related/SMC paper Feb2026/march02_finalsim/data") / f"true_states_{world}_N1000_T52.npy",
+        ]
+        
+        for npy_path in npy_paths:
             try:
-                true_states = np.load(world_dir / pattern)
+                true_states_full = np.load(npy_path)
+                # Subsample to match N if needed
+                N_data = data.get('N', true_states_full.shape[0])
+                if N_data < true_states_full.shape[0]:
+                    # Use same seed as data loading for consistency
+                    seed = data.get('seed', 42)
+                    rng = np.random.default_rng(seed)
+                    idx = rng.choice(true_states_full.shape[0], N_data, replace=False)
+                    true_states = true_states_full[idx, :]
+                else:
+                    true_states = true_states_full
+                print(f"    Loaded true_states from: {npy_path}")
                 break
-            except:
+            except Exception as e:
                 continue
     
+    print(f"    DEBUG: world={world}, N={data.get('N')}, T={data.get('T')}")
+
     if true_states is None:
+        print(f"    No true_states found for {world}")
         return metrics
+
+    # If we get here, true_states was found
+    print(f"    Computing ARI with true_states shape: {true_states.shape}")
     
     # Decode estimated states
     if 'alpha_filtered' not in idata.posterior:
+        print(f"    No alpha_filtered in posterior")
         return metrics
     
     try:
         alpha = idata.posterior['alpha_filtered'].mean(dim=['chain', 'draw']).values
         est_states = np.argmax(alpha, axis=-1)
+
+        # Match T dimensions - est_states may be shorter due to train/test split
+        T_est = est_states.shape[1]
+        T_true = true_states.shape[1]
         
-        true_flat = true_states.flatten()
+        if T_true > T_est:
+            true_states_trunc = true_states[:, :T_est]
+        else:
+            true_states_trunc = true_states
+        
+        true_flat = true_states_trunc.flatten()
         est_flat = est_states.flatten()
         
         # Mask valid entries
         mask = (true_flat >= 0) & (~np.isnan(true_flat))
         if mask.sum() == 0:
+            print(f"    No valid entries for comparison")
             return metrics
         
         true_flat = true_flat[mask]
         est_flat = est_flat[mask]
         
-        K = len(np.unique(true_flat))
-        
         # ARI (unadjusted)
+        from sklearn.metrics import adjusted_rand_score
         metrics['ari'] = adjusted_rand_score(true_flat, est_flat)
+        metrics['true_states_found'] = True
         
         # Best alignment accuracy
-        label_map, acc, aligned = find_best_alignment(true_flat, est_flat, K)
-        metrics['state_accuracy'] = acc
-        metrics['label_map'] = str(label_map)
-        metrics['true_states_found'] = True
-        metrics['K_true'] = K
+        K = len(np.unique(true_flat))
+        from sklearn.metrics import accuracy_score
+        from itertools import permutations
         
-        # Confusion matrix
-        cm = confusion_matrix(true_flat, aligned, labels=range(K))
-        cm_norm = cm.astype('float') / (cm.sum(axis=1, keepdims=True) + 1e-10)
+        if K <= 6:
+            best_acc = -1
+            for perm in permutations(range(K)):
+                remap = {i: perm[i] for i in range(K)}
+                aligned = np.vectorize(remap.get)(est_flat)
+                acc = accuracy_score(true_flat, aligned)
+                if acc > best_acc:
+                    best_acc = acc
+            metrics['state_accuracy'] = best_acc
         
-        for i in range(min(K, 4)):  # Store up to 4 states
-            metrics[f'cm_diag_{i}'] = cm_norm[i, i] if i < cm_norm.shape[0] else np.nan
+        print(f"    ARI: {metrics['ari']:.4f}, State Acc: {metrics['state_accuracy']:.4f}")
         
     except Exception as e:
-        print(f"    State recovery error: {e}")
+        print(f"    Error computing ARI: {e}")
+        import traceback
+        traceback.print_exc()
     
     return metrics
-
 
 # =============================================================================
 # 6. CLV EXTRACTION WITH 95% CI
@@ -301,7 +354,24 @@ def extract_clv_with_ci(idata, res: Dict, model_type: str) -> Dict:
         'clv_ci_high': []
     }
     
-    # Try different CLV variable names
+    # Try from results first (most reliable)
+    clv_list = res.get('clv_by_state', None)
+    if clv_list is not None:
+        clv_list = np.atleast_1d(clv_list)
+        if len(clv_list) > 0 and not np.all(np.isnan(clv_list)):
+            metrics['clv_by_state'] = clv_list.tolist() if hasattr(clv_list, 'tolist') else list(clv_list)
+            metrics['clv_total'] = float(np.sum(clv_list))
+            if len(clv_list) >= 2:
+                metrics['clv_ratio'] = float(np.max(clv_list) / (np.min(clv_list) + 1e-6))
+            
+            # Try to get CIs from results
+            ci_low = res.get('clv_ci_low', [np.nan] * len(clv_list))
+            ci_high = res.get('clv_ci_high', [np.nan] * len(clv_list))
+            metrics['clv_ci_low'] = np.atleast_1d(ci_low).tolist()
+            metrics['clv_ci_high'] = np.atleast_1d(ci_high).tolist()
+            return metrics
+    
+    # Try from idata posterior
     clv_var = None
     for var in ['clv_proxy', 'clv_by_state', 'clv']:
         if var in idata.posterior:
@@ -309,14 +379,7 @@ def extract_clv_with_ci(idata, res: Dict, model_type: str) -> Dict:
             break
     
     if clv_var is None:
-        # Try from results
-        clv_list = res.get('clv_by_state', [])
-        if clv_list:
-            metrics['clv_by_state'] = clv_list
-            metrics['clv_total'] = sum(clv_list)
-            if len(clv_list) >= 2:
-                metrics['clv_ratio'] = max(clv_list) / (min(clv_list) + 1e-6)
-        return metrics
+        return metrics  # No CLV available
     
     try:
         post = idata.posterior[clv_var]
@@ -354,11 +417,10 @@ def extract_clv_with_ci(idata, res: Dict, model_type: str) -> Dict:
                 hdi_low = hdi_low.mean(axis=tuple(range(hdi_low.ndim - 1)))
                 hdi_high = hdi_high.mean(axis=tuple(range(hdi_high.ndim - 1)))
             
-            metrics['clv_ci_low'] = hdi_low.tolist() if hasattr(hdi_low, 'tolist') else [float(hdi_low)]
-            metrics['clv_ci_high'] = hdi_high.tolist() if hasattr(hdi_high, 'tolist') else [float(hdi_high)]
+            metrics['clv_ci_low'] = np.atleast_1d(hdi_low).tolist()
+            metrics['clv_ci_high'] = np.atleast_1d(hdi_high).tolist()
             
         except Exception as e:
-            print(f"    HDI extraction failed: {e}")
             metrics['clv_ci_low'] = [np.nan] * K
             metrics['clv_ci_high'] = [np.nan] * K
             
@@ -366,7 +428,6 @@ def extract_clv_with_ci(idata, res: Dict, model_type: str) -> Dict:
         print(f"    CLV extraction error: {e}")
     
     return metrics
-
 
 # =============================================================================
 # 7. MAIN PROCESSING PIPELINE
@@ -493,34 +554,28 @@ def print_summary_table(df: pd.DataFrame):
         print(f"WORLD: {world.upper()}")
         print(f"{'='*80}")
         
-        # Display key columns
-        display_cols = ['model_type', 'K', 'glm_gam', 'log_evidence', 'oos_rmse', 'ari', 'clv_ratio']
-        display_cols = [c for c in display_cols if c in world_df.columns]
-        
         for idx, row in world_df.iterrows():
             print(f"\n{row['model_type']} K={row['K']} ({row.get('glm_gam', 'N/A')}):")
-            print(f"  Log-Ev: {row.get('log_evidence', np.nan):.2f} | "
-                  f"WAIC: {row.get('waic', np.nan):.2f} | "
-                  f"LOO: {row.get('loo', np.nan):.2f}")
+            print(f"  Log-Ev: {row.get('log_evidence', np.nan):.2f}")
             print(f"  OOS RMSE: {row.get('oos_rmse', np.nan):.4f} | "
                   f"MAE: {row.get('oos_mae', np.nan):.4f}")
             print(f"  ARI: {row.get('ari', np.nan):.3f} | "
                   f"State Acc: {row.get('state_accuracy', np.nan):.3f}")
             
             # CLV by state
-            k = int(row.get('K', 0))
+            k = int(row.get('K', 0)) if pd.notna(row.get('K')) else 0
             print(f"  CLV Ratio: {row.get('clv_ratio', np.nan):.1f}x")
             for state in range(min(k, 4)):
                 clv_str = format_clv_string(row, state)
                 print(f"    State {state}: {clv_str}")
         
         # Best by log-ev
-        best = world_df.loc[world_df['log_evidence'].idxmax()] if not world_df['log_evidence'].isna().all() else None
-        if best is not None:
+        valid_ev = world_df[world_df['log_evidence'].notna()]
+        if not valid_ev.empty:
+            best = valid_ev.loc[valid_ev['log_evidence'].idxmax()]
             print(f"\n  >>> BEST (Log-Ev): {best['model_type']} K={best['K']}")
     
     print("\n" + "="*120)
-
 
 def export_results(df: pd.DataFrame, out_path: Path, formats: List[str] = ['csv', 'latex']):
     """Export to multiple formats."""
