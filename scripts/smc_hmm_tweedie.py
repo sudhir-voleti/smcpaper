@@ -4,6 +4,14 @@ smc_hmm_tweedie.py
 ==================
 HMM-Tweedie model with saddlepoint approximation and OOS evaluation.
 Optimized for Apple Silicon (M1/M2/M3)
+
+
+# Recommended: state-varying p with shared phi
+python smc_hmm_tweedie.py --sim_path data.csv --K 3 --state_specific_p --shared_phi ...
+
+# Or: fixed p with state-varying phi
+python smc_hmm_tweedie.py --sim_path data.csv --K 3 --p_fixed 1.5 ...
+
 """
 
 # =============================================================================
@@ -25,6 +33,7 @@ os.environ['PYTENSOR_METAL'] = '0'
 import argparse
 import time
 import pathlib
+from pathlib import Path
 import pickle
 import warnings
 import platform
@@ -164,7 +173,7 @@ def gamma_logp_det(value, mu, phi):
 # =============================================================================
 # 3. TWEEDIE MODEL BUILDER
 # =============================================================================
-def make_model(data, K=3, state_specific_p=True, p_fixed=None, use_gam=True, gam_df=3, use_covariates=True):
+def make_model(data, K=3, state_specific_p=True, p_fixed=None, use_gam=True, gam_df=3, use_covariates=True, shared_phi=False):
 
     """Build HMM-Tweedie (K>=2) or Static Tweedie (K=1) with saddlepoint approximation."""
     N, T = data["N"], data["T"]
@@ -199,18 +208,24 @@ def make_model(data, K=3, state_specific_p=True, p_fixed=None, use_gam=True, gam
             # Sticky prior to encourage state persistence
             Gamma = pm.Dirichlet("Gamma", a=np.eye(K)*4 + 1, shape=(K, K))
 
+
         # ---- 2. INTERCEPTS & DISPERSION ----
         beta0_prior_mean = 2.0
         beta0_prior_sd = 2.0
         
         if K == 1:
             beta0 = pm.Normal("beta0", beta0_prior_mean, beta0_prior_sd)
-            phi = pm.Exponential("phi", lam=0.5)
+            phi = pm.Exponential("phi", lam=2.0)
         else:
             beta0_raw = pm.Normal("beta0_raw", 0, 1, shape=K)
             beta0_sorted = pt.sort(beta0_raw)
             beta0 = pm.Deterministic("beta0", beta0_sorted * beta0_prior_sd + beta0_prior_mean)
-            phi = pm.Exponential("phi", lam=0.5, shape=K)
+            
+            # Shared phi across states for identification (recommended when state_specific_p=True)
+            if shared_phi:
+                phi = pm.Exponential("phi", lam=2.0)
+            else:
+                phi = pm.Exponential("phi", lam=2.0, shape=K)
 
         # ---- 3. COVARIATE EFFECTS ----
         if use_covariates:
@@ -246,9 +261,10 @@ def make_model(data, K=3, state_specific_p=True, p_fixed=None, use_gam=True, gam
 
         # ---- 4. POWER PARAMETER P ----
         # Constrain p to [1.3, 1.7] to prevent boundary collapse (was [1.1, 1.9])
+        # ALWAYS wrap p in pm.Deterministic so it appears in posterior
         if p_fixed is not None:
-            # Fixed p across all states
-            p = pt.as_tensor_variable(np.array([p_fixed] * K, dtype=np.float32))
+            # Fixed p across all states - still save as deterministic for consistency
+            p = pm.Deterministic("p", pt.as_tensor_variable(np.array([p_fixed] * K, dtype=np.float32)))
         elif state_specific_p:
             # State-varying p with tighter bounds [1.3, 1.7]
             p_raw = pm.Beta("p_raw", alpha=2, beta=2, shape=K)
@@ -257,9 +273,15 @@ def make_model(data, K=3, state_specific_p=True, p_fixed=None, use_gam=True, gam
         else:
             # Shared p across states (estimated)
             p_raw = pm.Beta("p_raw", alpha=2, beta=2)
-            p = pm.Deterministic("p", 1.3 + p_raw * 0.4)  # [1.3, 1.7]
+            p_val = pm.Deterministic("p_val", 1.3 + p_raw * 0.4)  # scalar for inspection
             if K > 1:
-                p = pt.stack([p] * K)
+                p = pm.Deterministic("p", pt.stack([p_val] * K))  # vector for broadcasting
+            else:
+                p = pm.Deterministic("p", pt.stack([p_val]))  # ensure 1D even for K=1
+
+
+        # DEBUG: Verify p is registered as deterministic
+        assert 'p' in model.named_vars, f"'p' not in model.named_vars! p type: {type(p)}"
 
         # ---- 5. MU CALCULATION ----
         if use_covariates:
@@ -294,7 +316,11 @@ def make_model(data, K=3, state_specific_p=True, p_fixed=None, use_gam=True, gam
             y_in, mask_in = y, mask
         else:
             p_exp = p[None, None, :]
-            phi_exp = phi[None, None, :]
+            # Handle scalar phi (shared_phi=True) vs vector phi (state-specific)
+            if phi.ndim == 0:
+                phi_exp = phi  # scalar, will broadcast automatically
+            else:
+                phi_exp = phi[None, None, :]
             mu_exp = mu[..., None] if mu.ndim == 2 else mu
             y_in, mask_in = y[..., None], mask[:, :, None]
 
@@ -361,10 +387,112 @@ def make_model(data, K=3, state_specific_p=True, p_fixed=None, use_gam=True, gam
 # =============================================================================
 # 4. DATA LOADING
 # =============================================================================
-def load_simulation_data(data_path, n_cust=None, seed=42, train_frac=0.8):
+
+def load_uci_data(csv_path, n_cust=None, seed=42, train_frac=0.8, max_week=None):
+    """
+    Load UCI/CDNOW empirical data (ported from smc_tw_empirics.py).
+    """
+    import pandas as pd
+    from pathlib import Path
+    
+    csv_path = Path(csv_path)
+    df = pd.read_csv(csv_path)
+    df.columns = df.columns.str.strip()
+    
+    # Detect columns
+    id_col = 'customer_id' if 'customer_id' in df.columns else 'cust_id'
+    time_col = 'WeekStart' if 'WeekStart' in df.columns else 't'
+    y_col = 'spend' if 'spend' in df.columns else 'WeeklySpend'
+    
+    N_full = df[id_col].nunique()
+    T_full = df[time_col].nunique() if 't' in df.columns else df.groupby(id_col).size().iloc[0]
+    
+    # Pivot to wide format
+    obs = df.pivot(index=id_col, columns=time_col, values=y_col).values
+    
+    # Subsample if needed
+    if n_cust is not None and n_cust < N_full:
+        rng = np.random.default_rng(seed)
+        idx = rng.choice(N_full, n_cust, replace=False)
+        obs = obs[idx, :]
+        N = n_cust
+    else:
+        N = N_full
+        idx = np.arange(N)
+    
+    # Truncate to max_week
+    if max_week is not None:
+        T_effective = min(obs.shape[1], max_week)
+        obs = obs[:, :T_effective]
+    else:
+        T_effective = obs.shape[1]
+    
+    # Train/test split
+    T_train = int(T_effective * train_frac)
+    T_test = T_effective - T_train
+    
+    obs_train = obs[:, :T_train]
+    obs_test = obs[:, T_train:] if T_test > 0 else None
+    
+    # Masks
+    mask_train = ~np.isnan(obs_train)
+    mask_test = ~np.isnan(obs_test) if obs_test is not None else None
+    
+    # RFM features
+    R_train, F_train, M_train = compute_rfm_features(obs_train, mask_train)
+    
+    # Standardize
+    if R_train.std() > 0:
+        R_train = (R_train - R_train.mean()) / (R_train.std() + 1e-6)
+    if F_train.std() > 0:
+        F_train = (F_train - F_train.mean()) / (F_train.std() + 1e-6)
+    if M_train.std() > 0:
+        M_train = np.log1p(M_train)
+        M_train = (M_train - M_train.mean()) / (M_train.std() + 1e-6)
+    
+    data = {
+        'N': N, 'T': T_train, 'y': obs_train.astype(np.float32),
+        'mask': mask_train, 'R': R_train, 'F': F_train, 'M': M_train,
+        'customer_id': idx, 'time': np.arange(T_train), 'T_full': T_effective,
+        'T_test': T_test, 'world': 'uci',
+    }
+    
+    if obs_test is not None:
+        data['y_test'] = obs_test.astype(np.float32)
+        data['mask_test'] = mask_test
+        
+        # OOS RFM
+        R_test, F_test, M_test = compute_rfm_features_oos(obs_train, obs_test, mask_test)
+        
+        # Standardize using train stats
+        if R_train.std() > 0:
+            R_test = (R_test - R_train.mean()) / (R_train.std() + 1e-6)
+        if F_train.std() > 0:
+            F_test = (F_test - F_train.mean()) / (F_train.std() + 1e-6)
+        if M_train.std() > 0:
+            M_test = np.log1p(M_test)
+            M_test = (M_test - M_train.mean()) / (M_train.std() + 1e-6)
+        
+        data['R_test'] = R_test
+        data['F_test'] = F_test
+        data['M_test'] = M_test
+    
+    print(f"  UCI: N={N}, T_train={T_train}, T_test={T_test}, zeros={np.mean(obs_train==0):.1%}")
+    return data
+
+## ----
+
+
+def load_simulation_data(data_path, n_cust=None, seed=42, train_frac=0.8, max_week=None):
     """
     Load simulation data with train/test split.
     Default: 80% train, 20% test for OOS evaluation.
+    
+    Parameters:
+    -----------
+    max_week : int, optional
+        If provided, truncate data to this many periods before splitting.
+        Allows matching T across models (e.g., T=52 for all).
     """
     data_path = pathlib.Path(data_path)
     
@@ -378,12 +506,20 @@ def load_simulation_data(data_path, n_cust=None, seed=42, train_frac=0.8):
         y_col = 'y' if 'y' in df.columns else 'observations'
         
         N_full = df[id_col].nunique()
-        T = df[time_col].nunique()
+        T_full = df[time_col].nunique()
         obs = df.pivot(index=id_col, columns=time_col, values=y_col).values
         source = 'csv'
+        # Detect world from filename
+        world = "unknown"
+        for w in ['Harbor', 'Breeze', 'Fog', 'Cliff']:
+            if w.lower() in str(data_path).lower():
+                world = w
+                break
     else:
         raise ValueError(f"Only CSV supported, got: {data_path.suffix}")
     
+
+
     # Subsample if requested
     if n_cust is not None and n_cust < N_full:
         rng = np.random.default_rng(seed)
@@ -394,9 +530,17 @@ def load_simulation_data(data_path, n_cust=None, seed=42, train_frac=0.8):
         N = N_full
         idx = np.arange(N)
     
+    # Truncate to max_week if specified
+    if max_week is not None:
+        T_effective = min(T_full, max_week)
+        obs = obs[:, :T_effective]
+        print(f"  Truncated to max_week={max_week} (from {T_full})")
+    else:
+        T_effective = T_full
+    
     # Train/test split
-    T_train = int(T * train_frac)
-    T_test = T - T_train
+    T_train = int(T_effective * train_frac)
+    T_test = T_effective - T_train
     
     obs_train = obs[:, :T_train]
     obs_test = obs[:, T_train:] if T_test > 0 else None
@@ -408,7 +552,7 @@ def load_simulation_data(data_path, n_cust=None, seed=42, train_frac=0.8):
     # Compute RFM features
     R_train, F_train, M_train = compute_rfm_features(obs_train, mask_train)
     
-    # Standardize features (important for numerical stability)
+    # Standardize features
     if R_train.std() > 0:
         R_train = (R_train - R_train.mean()) / (R_train.std() + 1e-6)
     if F_train.std() > 0:
@@ -427,15 +571,16 @@ def load_simulation_data(data_path, n_cust=None, seed=42, train_frac=0.8):
         'M': M_train.astype(np.float32),
         'customer_id': idx, 
         'time': np.arange(T_train),
-        'T_full': T,
+        'T_full': T_effective,
         'T_test': T_test,
+        'world': world,
     }
     
     if obs_test is not None:
         data['y_test'] = obs_test.astype(np.float32)
         data['mask_test'] = mask_test
         
-        # Compute OOS RFM features (propagating from training)
+        # Compute OOS RFM features
         R_test, F_test, M_test = compute_rfm_features_oos(obs_train, obs_test, mask_test)
         
         # Standardize using training stats
@@ -453,16 +598,165 @@ def load_simulation_data(data_path, n_cust=None, seed=42, train_frac=0.8):
     
     print(f"  Loaded: N={N}, T_train={T_train}, T_test={T_test}, "
           f"zeros={np.mean(obs_train==0):.1%} ({source})")
-    print(f"  RFM stats - R: [{R_train.min():.2f}, {R_train.max():.2f}], "
-          f"F: [{F_train.min():.2f}, {F_train.max():.2f}], "
-          f"M: [{M_train.min():.2f}, {M_train.max():.2f}]")
     
     return data
-
 
 # =============================================================================
 # 5. OOS PREDICTION
 # =============================================================================
+
+def compute_tweedie_clv(idata, data, discount_rate=0.10, ci_levels=[2.5, 97.5]):
+    """
+    Compute CLV from Tweedie HMM with empirical spend per state.
+    Uses actual observed y values, not model-based psi.
+    """
+    try:
+        post = idata.posterior
+        
+        # Get state assignments from filtered probabilities
+        if 'alpha_filtered' in post:
+            alpha = post['alpha_filtered'].mean(dim=['chain', 'draw']).values
+            states = np.argmax(alpha, axis=-1)  # (N, T)
+        else:
+            print("    No alpha_filtered found")
+            return None
+        
+        y = data['y']
+        mask = data['mask']
+        
+        # Determine K correctly from posterior
+        if 'beta0' in post:
+            beta0_shape = post['beta0'].shape
+            if len(beta0_shape) > 2:
+                K = beta0_shape[-1]
+            else:
+                # Check if scalar or array
+                beta0_vals = post['beta0'].values
+                if np.isscalar(beta0_vals) or beta0_vals.ndim == 0:
+                    K = 1
+                else:
+                    K = beta0_shape[-1] if len(beta0_shape) > 0 else 1
+        else:
+            K = 1
+        
+        # Flatten arrays for proper indexing
+        states_flat = states.flatten()
+        y_flat = y.flatten()
+        mask_flat = mask.flatten()
+        
+        print(f"    DEBUG: K={K}, states shape={states.shape}, y shape={y.shape}")
+        
+        # Compute empirical spend per state
+        empirical_spend = []
+        for k in range(K):
+            state_mask = (states_flat == k) & mask_flat
+            n_obs = state_mask.sum()
+            if n_obs > 0:
+                spend_k = y_flat[state_mask]
+                # Mean of positive spends only
+                positive_spend = spend_k[spend_k > 0]
+                if len(positive_spend) > 0:
+                    mean_spend_k = float(np.mean(positive_spend))
+                else:
+                    mean_spend_k = 1.0  # Fallback if no positive spends
+                print(f"    State {k}: n_obs={n_obs}, positive={len(positive_spend)}, mean=${mean_spend_k:.2f}")
+            else:
+                mean_spend_k = 1.0
+                print(f"    State {k}: NO OBSERVATIONS")
+            empirical_spend.append(mean_spend_k)
+        
+        empirical_spend = np.array(empirical_spend)
+        print(f"    Empirical spend by state: {empirical_spend}")
+        
+        # Churn rate from Gamma diagonal
+        if K > 1 and 'Gamma' in post:
+            Gamma = post['Gamma'].mean(dim=['chain', 'draw']).values
+            churn_rate = 1.0 - np.diag(Gamma)
+        else:
+            churn_rate = np.zeros(K)
+        
+        print(f"    Churn rate: {churn_rate}")
+        
+        # CLV formula: empirical_spend / (discount + churn)
+        delta = discount_rate
+        clv_k = empirical_spend / (delta + churn_rate + 1e-10)
+        
+        print(f"    Raw CLV: {clv_k}")
+        
+        # Soft floor at $0.50 (only if very small)
+        clv_k = np.maximum(clv_k, 0.50)
+        
+        # Sort by CLV magnitude
+        order = np.argsort(clv_k)
+        clv_sorted = clv_k[order]
+        
+        result = {
+            'clv_by_state_sorted': clv_sorted.tolist(),
+            'state_labels': ['Dormant', 'Regular', 'Whale'] if K >= 3 else ['Low', 'High'],
+            'clv_total': float(np.sum(clv_k)),
+            'clv_ratio': float(np.max(clv_k) / (np.min(clv_k) + 1e-6)),
+            'discount_rate': discount_rate,
+            'order_indices': order.tolist(),
+            'empirical_spend': empirical_spend[order].tolist()
+        }
+        
+        # Posterior CI via sampling
+        if 'draw' in post.dims and post.draw.size > 1:
+            n_chains, n_draws = post.sizes['chain'], post.sizes['draw']
+            clv_draws = []
+            
+            for c in range(n_chains):
+                for d in range(n_draws):
+                    # State assignments for this draw
+                    if 'alpha_filtered' in post:
+                        alpha_d = post['alpha_filtered'].isel(chain=c, draw=d).values
+                        states_d = np.argmax(alpha_d, axis=-1).flatten()
+                    else:
+                        states_d = states_flat
+                    
+                    # Empirical spend for this draw's state assignments
+                    spend_d = []
+                    for k in range(K):
+                        state_mask_d = (states_d == k) & mask_flat
+                        if state_mask_d.sum() > 0:
+                            spend_k_d = y_flat[state_mask_d]
+                            positive_spend_d = spend_k_d[spend_k_d > 0]
+                            if len(positive_spend_d) > 0:
+                                spend_d.append(np.mean(positive_spend_d))
+                            else:
+                                spend_d.append(empirical_spend[k])
+                        else:
+                            spend_d.append(empirical_spend[k])
+                    
+                    spend_d = np.array(spend_d)
+                    
+                    # Gamma and churn
+                    if K > 1 and 'Gamma' in post:
+                        Gamma_d = post['Gamma'].isel(chain=c, draw=d).values
+                        churn_d = 1.0 - np.diag(Gamma_d)
+                    else:
+                        churn_d = np.zeros(K)
+                    
+                    clv_d = spend_d / (delta + churn_d + 1e-10)
+                    clv_d = np.maximum(clv_d, 0.50)
+                    clv_draws.append(clv_d)
+            
+            clv_draws = np.array(clv_draws)
+            ci_low = np.percentile(clv_draws, ci_levels[0], axis=0)
+            ci_high = np.percentile(clv_draws, ci_levels[1], axis=0)
+            
+            result['clv_ci_low'] = ci_low[order].tolist()
+            result['clv_ci_high'] = ci_high[order].tolist()
+        
+        return result
+        
+    except Exception as e:
+        print(f"    CLV computation error: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+## ----
 
 def compute_oos_prediction(data, idata, use_gam, gam_df, n_draws_use=200):
     """
@@ -591,45 +885,33 @@ def compute_oos_prediction(data, idata, use_gam, gam_df, n_draws_use=200):
         traceback.print_exc()
         return {'rmse': np.nan, 'mae': np.nan, 'y_pred': None}
 
+## ----
+
 
 # =============================================================================
 # 6. SMC RUNNER
 # =============================================================================
-def run_smc(
-    data,
-    K,
-    state_specific_p,
-    p_fixed,
-    use_gam,
-    gam_df,
-    draws,
-    chains,
-    seed,
-    out_dir,
-    use_covariates=True
-):
-    """Run SMC with Tweedie model and OOS evaluation."""
-    
-    cores = min(chains, os.cpu_count() or 1)
-    t0 = time.time()
-    
-    try:
-        with make_model(
-            data,
-            K=K,
-            state_specific_p=state_specific_p,
-            p_fixed=p_fixed,
-            use_gam=use_gam,
-            gam_df=gam_df,
-            use_covariates=use_covariates
-        ) as model:
-            
-            print(
-                f" Model: K={K}, Tweedie-{'GAM' if use_gam else 'GLM'}, "
-                f"p={'state-specific' if state_specific_p else p_fixed}, "
-                f"covariates={'yes' if use_covariates else 'no'}"
-            )
 
+def run_smc(data, K, state_specific_p, p_fixed, use_gam, gam_df, draws, chains, seed, out_dir, use_covariates=True, shared_phi=False):
+    """Run SMC with Tweedie model - FIXED ESS MEMORY ISSUE."""
+    cores = min(chains, 4)
+    t0 = time.time()
+
+    # Initialize ALL metrics
+    log_ev = np.nan
+    oos_rmse_val = np.nan
+    oos_mae_val = np.nan
+    clv_by_state_list = []
+    clv_total_val = np.nan
+    clv_ratio_val = np.nan
+    clv_ci_low_list = []
+    clv_ci_high_list = []
+    ess_min_val = np.nan
+
+    try:
+        with make_model(data, K, state_specific_p, p_fixed, use_gam, gam_df, use_covariates, shared_phi) as model:
+            print(f"\nModel: K={K}, TWEEDIE, p={'state-varying' if state_specific_p else p_fixed}")
+            print(f"SMC: draws={draws}, chains={chains}, cores={cores}")
 
             idata = pm.sample_smc(
                 draws=draws,
@@ -638,143 +920,132 @@ def run_smc(
                 random_seed=seed,
                 return_inferencedata=True
             )
-            
 
-        # Post-hoc ESS calculation (more accurate)
-        try:
-            # Use arviz ESS on key parameters
-            ess_vals = []
-            for var in ['beta0', 'phi', 'Gamma']:
-                if var in idata.posterior:
-                    ess = az.ess(idata, var_names=[var])
-                    ess_vals.append(ess.to_array().values.flatten())
-            if ess_vals:
-                ess_min = float(np.nanmin(np.concatenate(ess_vals)))
-            else:
-                ess_min = np.nan
-        except:
-            ess_min = np.nan
-        
-        # Extract log-evidence
-        log_ev = np.nan
-        try:
-            lm = idata.sample_stats.log_marginal_likelihood.values
-            if isinstance(lm, np.ndarray) and lm.dtype == object:
-                chain_vals = []
-                for c in range(lm.shape[1] if lm.ndim > 1 else 1):
-                    if lm.ndim > 1:
-                        chain_list = lm[-1, c] if lm.shape[0] > 0 else lm[0, c]
-                    else:
-                        chain_list = lm[c] if lm.ndim == 1 else lm[0]
-                    if isinstance(chain_list, list):
-                        valid = [
-                            float(x) for x in chain_list
-                            if isinstance(x, (int, float, np.floating)) and np.isfinite(x)
-                        ]
-                        if valid:
-                            chain_vals.append(valid[-1])
-                    elif isinstance(chain_list, (int, float, np.floating)) and np.isfinite(chain_list):
-                        chain_vals.append(float(chain_list))
-                log_ev = float(np.mean(chain_vals)) if chain_vals else np.nan
-            else:
-                flat = np.array(lm).flatten()
-                valid = flat[np.isfinite(flat)]
-                log_ev = float(np.mean(valid)) if len(valid) > 0 else np.nan
-        except Exception as e:
-            print(f" Warning: log-ev extraction failed: {e}")
-        
-        if log_ev > 0:
-            print(" WARNING: Positive Log-Ev detected. Numerical instability likely.")
-        
-        elapsed = (time.time() - t0) / 60
-        
-        # Compute ESS and R-hat
-        ess_min = np.nan
-        rhat_max = np.nan
-        try:
-            ess = az.ess(idata)
-            rhat = az.rhat(idata)
-            ess_min = float(ess.to_array().min())
-            rhat_max = float(rhat.to_array().max())
-        except:
-            pass
-        
-        res = {
-            'K': K,
-            'model_type': 'tweedie',
-            'N': data['N'],
-            'T': data['T'],
-            'T_test': data.get('T_test', 0),
-            'use_gam': use_gam,
-            'gam_df': gam_df if use_gam else None,
-            'use_covariates': use_covariates,
-            'state_specific_p': state_specific_p,
-            'p_fixed': p_fixed,
-            'log_evidence': log_ev,
-            'draws': draws,
-            'chains': chains,
-            'time_min': elapsed,
-            'timestamp': time.strftime('%Y%m%d_%H%M%S'),
-            'ess_min': ess_min,
-            'rhat_max': rhat_max,
-        }
-        
-        # OOS prediction
-        if 'y_test' in data:
-            print(" Computing OOS predictions...")
-            oos_results = compute_oos_prediction(data, idata, use_gam, gam_df)
-            res['oos_rmse'] = oos_results.get('rmse', np.nan)
-            res['oos_mae'] = oos_results.get('mae', np.nan)
-            res['oos_log_pred'] = oos_results.get('log_pred_score', np.nan)
-            res['y_pred_mean'] = oos_results.get('y_pred', None)  # Save actual predictions
-            print(f" OOS RMSE: {res['oos_rmse']:.4f}, MAE: {res['oos_mae']:.4f}")
-        
-        # Compute WAIC and LOO for model comparison
-        try:
-            waic = az.waic(idata)
-            loo = az.loo(idata)
-            res['waic'] = float(waic.waic)
-            res['waic_se'] = float(waic.waic_se)
-            res['loo'] = float(loo.loo)
-            res['loo_se'] = float(loo.loo_se)
-            print(f" WAIC: {res['waic']:.2f}, LOO: {res['loo']:.2f}")
-        except Exception as e:
-            print(f" WAIC/LOO computation failed: {e}")
-            res['waic'] = np.nan
-            res['loo'] = np.nan
-        
-        p_tag = "statep" if state_specific_p else f"p{p_fixed}"
-        pkl_path = out_dir / f"smc_K{K}_TWEEDIE_{'GAM' if use_gam else 'GLM'}_{p_tag}_N{data['N']}_T{data['T']}_D{draws}.pkl"
-        
-        with open(pkl_path, 'wb') as f:
-            pickle.dump({'idata': idata, 'res': res, 'data': data}, f, protocol=4)
-        
-        print(
-            f" log_ev={log_ev:.2f}, ess_min={ess_min:.1f}, "
-            f"rhat_max={rhat_max:.3f}, time={elapsed:.1f}min"
-        )
-        print(f" Saved: {pkl_path}")
-        
-        return pkl_path, res
-   
+            elapsed = (time.time() - t0) / 60
+
+            # Log-evidence extraction
+            try:
+                lm = idata.sample_stats.log_marginal_likelihood.values
+                if hasattr(lm, 'dtype') and lm.dtype == object:
+                    chain_finals = []
+                    for c in range(lm.shape[1] if lm.ndim > 1 else 1):
+                        chain_slice = lm[-1, c] if lm.ndim > 1 else lm[c]
+                        if isinstance(chain_slice, (list, np.ndarray)):
+                            valid = [float(x) for x in chain_slice if isinstance(x, (int, float, np.floating)) and np.isfinite(x)]
+                            if valid:
+                                chain_finals.append(valid[-1])
+                        elif np.isfinite(float(chain_slice)):
+                            chain_finals.append(float(chain_slice))
+                    log_ev = float(np.mean(chain_finals)) if chain_finals else np.nan
+                else:
+                    flat = np.array(lm).flatten()
+                    valid = flat[np.isfinite(flat)]
+                    log_ev = float(np.mean(valid)) if len(valid) > 0 else np.nan
+                print(f"  EXTRACTED log_ev: {log_ev:.2f}")
+            except Exception as e:
+                print(f"  LOG-EV ERROR: {e}")
+                log_ev = np.nan
+
+            # OOS prediction
+            if 'y_test' in data:
+                print("  Computing OOS predictions...")
+                try:
+                    oos_results = compute_oos_prediction(data, idata, use_gam, gam_df)
+                    if oos_results and isinstance(oos_results, dict):
+                        oos_rmse_val = float(oos_results.get('rmse', np.nan))
+                        oos_mae_val = float(oos_results.get('mae', np.nan))
+                        print(f"  EXTRACTED OOS: RMSE={oos_rmse_val:.4f}, MAE={oos_mae_val:.4f}")
+                except Exception as e:
+                    print(f"  OOS ERROR: {e}")
+
+            # CLV computation
+            print("  Computing CLV...")
+            try:
+                clv_results = compute_tweedie_clv(idata, data, discount_rate=0.10)
+                if clv_results and isinstance(clv_results, dict):
+                    clv_arr = clv_results.get('clv_by_state_sorted', [])
+                    clv_by_state_list = [float(x) for x in np.atleast_1d(clv_arr)]
+                    clv_total_val = float(clv_results.get('clv_total', np.nan))
+                    clv_ratio_val = float(clv_results.get('clv_ratio', np.nan))
+                    clv_ci_low_list = np.atleast_1d(clv_results.get('clv_ci_low', [])).tolist()
+                    clv_ci_high_list = np.atleast_1d(clv_results.get('clv_ci_high', [])).tolist()
+                    print(f"  EXTRACTED CLV: {clv_by_state_list}")
+            except Exception as e:
+                print(f"  CLV ERROR: {e}")
+
+            # ESS - SKIP TO AVOID MEMORY SPIKE
+            print("  Skipping ESS (memory intensive)...")
+            ess_min_val = np.nan
+
+            # Build res
+            res = {
+                'K': K,
+                'model_type': 'TWEEDIE',
+                'world': data.get('world', 'unknown'),
+                'N': data['N'],
+                'T': data['T'],
+                'log_evidence': log_ev,
+                'draws': draws,
+                'chains': chains,
+                'time_min': elapsed,
+                'oos_rmse': oos_rmse_val,
+                'oos_mae': oos_mae_val,
+                'clv_by_state': clv_by_state_list,
+                'clv_total': clv_total_val,
+                'clv_ratio': clv_ratio_val,
+                'clv_ci_low': clv_ci_low_list,
+                'clv_ci_high': clv_ci_high_list,
+                'ess_min': ess_min_val,
+                'p_fixed': None if state_specific_p else p_fixed,
+                'state_specific_p': state_specific_p,
+                'use_gam': use_gam,
+                'use_covariates': use_covariates,
+                'shared_phi': shared_phi
+            }
+
+            # SAVE
+            out_dir = Path(out_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            gam_str = 'GAM' if use_gam else 'GLM'
+            p_str = 'statep' if state_specific_p else f'p{p_fixed}'
+            pkl_name = f"smc_K{K}_TWEEDIE_{gam_str}_{p_str}_N{data['N']}_T{data['T']}_D{draws}.pkl"
+            pkl_path = out_dir / pkl_name
+
+            data_light = {
+                'N': data.get('N'),
+                'T': data.get('T'),
+                'T_full': data.get('T_full'),
+                'T_test': data.get('T_test'),
+                'world': data.get('world'),
+                'customer_id': data.get('customer_id'),
+                'train_stats': data.get('train_stats')
+            }
+
+            print(f"  Saving...")
+            with open(pkl_path, 'wb') as f:
+                pickle.dump({'idata': idata, 'res': res, 'data': data_light}, f, protocol=4)
+
+            print(f"\n  SAVED: {pkl_path}")
+            return pkl_path, res
+
     except Exception as e:
-        print(f" CRASH: {str(e)[:60]}")
+        print(f"\n  CRASH: {str(e)[:80]}")
         import traceback
         traceback.print_exc()
-        raise
+        return None, {'error': str(e)}
 
 # =============================================================================
 # 7. MAIN
 # =============================================================================
 def main():
     parser = argparse.ArgumentParser(description='HMM-Tweedie Model with OOS Evaluation')
-    parser.add_argument('--dataset', required=True, choices=['simulation'])
+    parser.add_argument('--dataset', required=True, choices=['simulation', 'uci', 'cdnow'])
     parser.add_argument('--sim_path', type=str, required=True,
                        help='Path to simulation CSV file')
     parser.add_argument('--n_cust', type=int, default=None)
     parser.add_argument('--K', type=int, default=3)
     parser.add_argument('--state_specific_p', action='store_true')
-    parser.add_argument('--p_fixed', type=float, default=1.5)
+    parser.add_argument('--p_fixed', type=float, default=None)
     parser.add_argument('--no_gam', action='store_true')
     parser.add_argument('--gam_df', type=int, default=3)
     parser.add_argument('--draws', type=int, default=1000)
@@ -783,8 +1054,12 @@ def main():
     parser.add_argument('--seed', type=int, default=RANDOM_SEED)
     parser.add_argument('--train_frac', type=float, default=0.8,
                        help='Fraction for training (default 0.8 = 80%% train, 20%% test)')
+    parser.add_argument('--max_week', type=int, default=None,
+                       help='Maximum week to use (truncate T to this value before train/test split)')
     parser.add_argument('--no_covariates', action='store_true',
                        help='Disable RFM covariates (intercept-only)')
+    parser.add_argument('--shared_phi', action='store_true',
+                       help='Use single phi shared across all states (default: state-specific, recommended with state_specific_p)')
     
     args = parser.parse_args()
 
@@ -801,13 +1076,22 @@ def main():
           f"Covariates: {'no' if args.no_covariates else 'yes'}")
     print(f"{'='*70}")
 
-    data = load_simulation_data(args.sim_path, n_cust=args.n_cust, 
-                                seed=args.seed, train_frac=args.train_frac)
+    if args.dataset in ['uci', 'cdnow']:
+        data = load_uci_data(args.sim_path, n_cust=args.n_cust,
+                            seed=args.seed, train_frac=args.train_frac,
+                            max_week=args.max_week)
+    else:
+        data = load_simulation_data(args.sim_path, n_cust=args.n_cust,
+                                    seed=args.seed, train_frac=args.train_frac,
+                                    max_week=args.max_week)
 
     print(f"\nRunning SMC...")
     pkl_path, res = run_smc(data, args.K, args.state_specific_p, args.p_fixed,
                            not args.no_gam, args.gam_df, args.draws, args.chains,
-                           args.seed, out_dir, use_covariates=not args.no_covariates)
+                           args.seed, out_dir, use_covariates=not args.no_covariates,
+                           shared_phi=args.shared_phi)
+
+    print(f"DEBUG: state_specific_p={args.state_specific_p}, p_fixed={args.p_fixed}")
 
     print(f"\n{'='*70}")
     print("RESULTS")
