@@ -13,6 +13,9 @@ from sklearn.metrics import adjusted_rand_score
 import multiprocessing as mp
 import re
 import warnings
+import sys
+from tqdm import tqdm
+
 warnings.filterwarnings('ignore')
 
 
@@ -94,18 +97,15 @@ def extract_hessian_for_pkl(pkl_path):
         idata = saved['idata']
         res = saved.get('res', {})
         
-        # Extract covariance info if available
         result = {
             'pkl_path': str(pkl_path),
             'model_type': 'BEMMAOR' if 'BEMMAOR' in str(pkl_path) else 'Hurdle'
         }
         
-        # Try to get parameter count
         if hasattr(idata, 'posterior'):
             n_vars = len(idata.posterior.data_vars)
             result['n_posterior_vars'] = n_vars
         
-        # Store log evidence
         result['log_evidence'] = res.get('log_evidence', res.get('log_ev', np.nan))
         
         return result
@@ -128,10 +128,8 @@ def extract_eigen_for_pkl(pkl_path):
             'log_evidence': res.get('log_evidence', res.get('log_ev', np.nan))
         }
         
-        # Try to extract covariance eigenvalues
         try:
             from scipy import linalg
-            # Get theta covariance as proxy
             if 'theta' in idata.posterior:
                 theta = idata.posterior['theta'].values
                 theta_flat = theta.reshape(-1, theta.shape[-1])
@@ -188,7 +186,6 @@ def extract_viterbi_for_pkl(pkl_path):
                     states, counts = np.unique(vit[:, :, i, t].flatten(), return_counts=True)
                     Z_pred[i, t] = states[np.argmax(counts)]
         
-        # Compute dynamics
         transitions = np.sum(np.abs(np.diff(Z_pred, axis=1)) > 0, axis=1)
         total_transitions = int(np.sum(transitions))
         static_customers = int(np.sum(transitions == 0))
@@ -203,7 +200,7 @@ def extract_viterbi_for_pkl(pkl_path):
             'transitions_per_customer_std': float(np.std(transitions)),
             'static_customers': static_customers,
             'static_pct': 100.0 * static_customers / N,
-            'overall_accuracy': np.nan,  # Would need true states
+            'overall_accuracy': np.nan,
             'log_evidence': res.get('log_evidence', res.get('log_ev', np.nan))
         }
     except Exception as e:
@@ -211,37 +208,30 @@ def extract_viterbi_for_pkl(pkl_path):
 
 
 def process_folder(folder_path):
-    """Process all PKLs in a folder."""
+    """Process all PKLs in a folder with progress tracking."""
     folder = Path(folder_path)
     if not folder.exists():
         return []
     
-    # Find DGP file
     dgp_files = list(folder.glob('dgp_*.pkl'))
     dgp_path = dgp_files[0] if dgp_files else None
-    
-    # Find model PKLs
     model_pkls = list(folder.glob('smc_*.pkl'))
     
     results = []
     for pkl_path in model_pkls:
-        # ARI
         if dgp_path:
             ari_result = extract_ari_for_pkl(pkl_path, dgp_path)
             if ari_result and 'error' not in ari_result:
                 results.append(('ari', ari_result))
         
-        # Hessian
         hess_result = extract_hessian_for_pkl(pkl_path)
         if hess_result and 'error' not in hess_result:
             results.append(('hessian', hess_result))
         
-        # Eigen
         eigen_result = extract_eigen_for_pkl(pkl_path)
         if eigen_result and 'error' not in eigen_result:
             results.append(('eigen', eigen_result))
         
-        # Viterbi
         vit_result = extract_viterbi_for_pkl(pkl_path)
         if vit_result and 'error' not in vit_result:
             results.append(('viterbi', vit_result))
@@ -256,16 +246,20 @@ def main():
     parser.add_argument('--n_jobs', type=int, default=4, help='Parallel workers')
     args = parser.parse_args()
     
-    # Read folders
     with open(args.folders) as f:
         folders = [line.strip() for line in f if line.strip()]
     
     print(f"Processing {len(folders)} folders with {args.n_jobs} workers...")
+    print(f"Output: {args.output}")
+    print("=" * 60)
     
-    # Process in parallel
+    # Process with progress bar
     all_results = []
     with mp.Pool(args.n_jobs) as pool:
-        for results in pool.imap_unordered(process_folder, folders):
+        for results in tqdm(pool.imap_unordered(process_folder, folders), 
+                          total=len(folders), 
+                          desc="Folders",
+                          unit="folder"):
             all_results.extend(results)
     
     # Separate by type
@@ -274,7 +268,7 @@ def main():
     eigen_rows = [r[1] for r in all_results if r[0] == 'eigen']
     vit_rows = [r[1] for r in all_results if r[0] == 'viterbi']
     
-    print(f"Extracted: ARI={len(ari_rows)}, Hessian={len(hess_rows)}, Eigen={len(eigen_rows)}, Viterbi={len(vit_rows)}")
+    print(f"\nExtracted: ARI={len(ari_rows)}, Hessian={len(hess_rows)}, Eigen={len(eigen_rows)}, Viterbi={len(vit_rows)}")
     
     # Build DataFrames
     df_ari = pd.DataFrame(ari_rows) if ari_rows else pd.DataFrame()
@@ -290,7 +284,7 @@ def main():
                 if col in parsed.columns:
                     df[col] = parsed[col]
     
-    # Merge on pkl_path
+    # Merge
     df_master = df_ari.copy() if len(df_ari) > 0 else pd.DataFrame()
     
     if len(df_hess) > 0:
@@ -305,21 +299,21 @@ def main():
         vit_cols = [c for c in df_vit.columns if c not in df_master.columns and c != 'pkl_path']
         df_master = df_master.merge(df_vit[['pkl_path'] + vit_cols], on='pkl_path', how='outer')
     
-    # Deduplicate
     if len(df_master) > 0:
         df_master.drop_duplicates(subset=['pkl_path'], keep='last', inplace=True)
     
-    # Save
     df_master.to_csv(args.output, index=False)
-    print(f"\nSaved: {args.output} ({len(df_master)} rows, {len(df_master.columns)} columns)")
+    print(f"\n{'='*60}")
+    print(f"SAVED: {args.output}")
+    print(f"  Rows: {len(df_master)}")
+    print(f"  Cols: {len(df_master.columns)}")
     
-    # Quick summary
     if len(df_master) > 0 and 'model_type' in df_master.columns:
         print(f"\nBy model: {df_master['model_type'].value_counts().to_dict()}")
         if 'ari' in df_master.columns:
             print(f"With ARI: {df_master['ari'].notna().sum()}")
         if 'transitions_per_customer_mean' in df_master.columns:
-            print(f"With Viterbi dynamics: {df_master['transitions_per_customer_mean'].notna().sum()}")
+            print(f"With Viterbi: {df_master['transitions_per_customer_mean'].notna().sum()}")
 
 
 if __name__ == '__main__':
